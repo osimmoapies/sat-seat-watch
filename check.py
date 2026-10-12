@@ -351,85 +351,93 @@ def main():
             # be reported as a workflow failure, or GitHub emails on every 5-min run
             sys.exit(0 if expected_pause else 1)
 
-        body_text = page.inner_text("body")
-        idx = body_text.find("Find a Test Center")
-        snippet = body_text[idx: idx + 600] if idx >= 0 else body_text[:600]
-        log("RESULT SNIPPET:", snippet.replace("\n", " ")[:300])
+        try:
+            body_text = page.inner_text("body")
+            idx = body_text.find("Find a Test Center")
+            snippet = body_text[idx: idx + 600] if idx >= 0 else body_text[:600]
+            log("RESULT SNIPPET:", snippet.replace("\n", " ")[:300])
 
-        has_center = ("Dushanbe" in snippet) or ("Qsi International" in snippet)
-        no_seats_text = "No seats available" in snippet
+            has_center = ("Dushanbe" in snippet) or ("Qsi International" in snippet)
+            no_seats_text = "No seats available" in snippet
 
-        if not os.path.exists(FLAG_PATH):
-            tg("🟡 SAT-мониторинг в облаке (GitHub Actions) запущен и работает. Проверка каждые ~5 минут, независимо от твоего Mac.")
-            with open(FLAG_PATH, "w") as f:
-                f.write("started")
+            if not os.path.exists(FLAG_PATH):
+                tg("🟡 SAT-мониторинг в облаке (GitHub Actions) запущен и работает. Проверка каждые ~5 минут, независимо от твоего Mac.")
+                with open(FLAG_PATH, "w") as f:
+                    f.write("started")
 
-        # scope the click to the actual result row (Qsi International...), not the
-        # whole page -- avoids matching an unrelated "Select"/"Reserve" text elsewhere
-        row_handle = page.evaluate_handle("""
-            () => {
-                var all = Array.from(document.querySelectorAll('*'));
-                return all.find(e => /Qsi International/i.test(e.innerText||'') && e.innerText.length < 2000) || null;
-            }
-        """)
-        row_el = row_handle.as_element()
-        sel_btn = None
-        if row_el:
-            sel_btn = row_el.query_selector("button:has-text('Select'), a:has-text('Select'), button:has-text('Reserve')")
-
-        # the PRIMARY signal is a real clickable button in the row, not the absence of a
-        # specific phrase -- that phrase could change wording and silently break this
-        # check forever, causing a false "seat available" alert on every single run.
-        seat_available = has_center and sel_btn is not None
-
-        if has_center and not seat_available and not no_seats_text:
-            # text changed in a way we don't recognise: no "No seats available" phrase,
-            # but also no button found -- log loudly so this gets noticed, but do NOT
-            # alert the owner on every run for something we can't act on anyway.
-            log("WARNING: unrecognised result-row state (neither 'no seats' text nor a button found) -- site text may have changed:", snippet[:300])
-
-        if seat_available:
-            log("SEAT AVAILABLE - attempting reserve")
-            tg("🟢🟢🟢 МЕСТО В ДУШАНБЕ НА 5 ДЕКАБРЯ ПОЯВИЛОСЬ! Пытаюсь забронировать прямо сейчас — жди второе сообщение с реальным статусом.")
-
-            url_before = page.url
-            text_before = page.inner_text("body")
-
-            # sel_btn is guaranteed non-None here: seat_available already required it
-            sel_btn.click(force=True)
-            time.sleep(3)
-            # this site requires a page-level Continue after Select on every other
-            # step (date, school info, terms) -- almost certainly true here too.
-            # Find a continue-ish id while explicitly excluding the session/timeout modal's.
-            cont_id = page.evaluate("""
+            # scope the click to the actual result row (Qsi International...), not the
+            # whole page -- avoids matching an unrelated "Select"/"Reserve" text elsewhere
+            row_handle = page.evaluate_handle("""
                 () => {
-                    var ids = Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]')).map(e => e.id);
-                    return ids.find(id => id && !/session|timeout/i.test(id)) || null;
+                    var all = Array.from(document.querySelectorAll('*'));
+                    return all.find(e => /Qsi International/i.test(e.innerText||'') && e.innerText.length < 2000) || null;
                 }
             """)
-            if cont_id:
-                btn = page.query_selector(f"#{cont_id}")
-                if btn and not btn.is_disabled():
-                    btn.click(force=True)
-                    time.sleep(4)
-            page.bring_to_front()
-            time.sleep(1)
-            url_after = page.url
-            text_after = page.inner_text("body")
-            changed = (url_after != url_before) or (text_after != text_before)
-            looks_confirmed = any(k in text_after for k in ["photo", "Photo", "payment", "Payment", "upload", "Upload"]) or url_after != url_before
-            reserved_ok = changed and looks_confirmed
-            detail = f"url_before={url_before} url_after={url_after} text_after_preview={text_after[:300]}"
-            log("RESERVE ATTEMPT RESULT:", detail)
+            row_el = row_handle.as_element()
+            sel_btn = None
+            if row_el:
+                sel_btn = row_el.query_selector("button:has-text('Select'), a:has-text('Select'), button:has-text('Reserve')")
 
-            if reserved_ok:
-                tg("✅ Бронь похожа на успешную (страница сдвинулась дальше). ИДИ К КОМПЬЮТЕРУ СЕЙЧАС — "
-                   "20 минут на фото и оплату $68, иначе бронь сгорит: https://satreg.collegeboard.org/register/testCenterSearch")
+            # the PRIMARY signal is a real clickable button in the row, not the absence of a
+            # specific phrase -- that phrase could change wording and silently break this
+            # check forever, causing a false "seat available" alert on every single run.
+            seat_available = has_center and sel_btn is not None
+
+            if has_center and not seat_available and not no_seats_text:
+                # text changed in a way we don't recognise: no "No seats available" phrase,
+                # but also no button found -- log loudly so this gets noticed, but do NOT
+                # alert the owner on every run for something we can't act on anyway.
+                log("WARNING: unrecognised result-row state (neither 'no seats' text nor a button found) -- site text may have changed:", snippet[:300])
+
+            if seat_available:
+                log("SEAT AVAILABLE - attempting reserve")
+                tg("🟢🟢🟢 МЕСТО В ДУШАНБЕ НА 5 ДЕКАБРЯ ПОЯВИЛОСЬ! Пытаюсь забронировать прямо сейчас — жди второе сообщение с реальным статусом.")
+
+                url_before = page.url
+                text_before = page.inner_text("body")
+
+                # sel_btn is guaranteed non-None here: seat_available already required it
+                sel_btn.click(force=True)
+                time.sleep(3)
+                # this site requires a page-level Continue after Select on every other
+                # step (date, school info, terms) -- almost certainly true here too.
+                # Find a continue-ish id while explicitly excluding the session/timeout modal's.
+                cont_id = page.evaluate("""
+                    () => {
+                        var ids = Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]')).map(e => e.id);
+                        return ids.find(id => id && !/session|timeout/i.test(id)) || null;
+                    }
+                """)
+                if cont_id:
+                    btn = page.query_selector(f"#{cont_id}")
+                    if btn and not btn.is_disabled():
+                        btn.click(force=True)
+                        time.sleep(4)
+                page.bring_to_front()
+                time.sleep(1)
+                url_after = page.url
+                text_after = page.inner_text("body")
+                changed = (url_after != url_before) or (text_after != text_before)
+                looks_confirmed = any(k in text_after for k in ["photo", "Photo", "payment", "Payment", "upload", "Upload"]) or url_after != url_before
+                reserved_ok = changed and looks_confirmed
+                detail = f"url_before={url_before} url_after={url_after} text_after_preview={text_after[:300]}"
+                log("RESERVE ATTEMPT RESULT:", detail)
+
+                if reserved_ok:
+                    tg("✅ Бронь похожа на успешную (страница сдвинулась дальше). ИДИ К КОМПЬЮТЕРУ СЕЙЧАС — "
+                       "20 минут на фото и оплату $68, иначе бронь сгорит: https://satreg.collegeboard.org/register/testCenterSearch")
+                else:
+                    tg(f"⚠️ НЕ УВЕРЕН, что бронь прошла — проверить не смог. Заходи СЕЙЧАС САМ и бронируй вручную: "
+                       f"https://satreg.collegeboard.org/register/testCenterSearch (детали: {detail[:200]})")
             else:
-                tg(f"⚠️ НЕ УВЕРЕН, что бронь прошла — проверить не смог. Заходи СЕЙЧАС САМ и бронируй вручную: "
-                   f"https://satreg.collegeboard.org/register/testCenterSearch (детали: {detail[:200]})")
-        else:
-            log("no seats this run")
+                log("no seats this run")
+        except Exception as e:
+            # this block runs at the single most important moment (a real seat found) --
+            # it must NEVER crash silently. If anything throws here, tell the owner
+            # immediately to go check by hand rather than losing the moment to a traceback.
+            log("EXCEPTION during seat-detection/reservation block:", repr(e))
+            tg(f"🔴🔴 ОШИБКА во время попытки бронирования — проверить автоматически не смог. "
+               f"СРОЧНО зайди сам: https://satreg.collegeboard.org/register/testCenterSearch (ошибка: {str(e)[:200]})")
 
         context.storage_state(path=STATE_PATH)
         browser.close()
