@@ -196,10 +196,31 @@ def ensure_on_test_center_search(context, page):
             # password-only step-up handled above. Previously this silently fell
             # through, leaving `content` pointed at the raw login page, which made
             # the run quietly report "no seats" without ever reaching the real page.
-            log("DEBUG full re-login required (session fully expired)")
-            do_login(page)
-            page.goto("https://mysat.collegeboard.org/", wait_until="domcontentloaded", timeout=45000)
-            time.sleep(3)
+            #
+            # Do NOT navigate away to the generic login URL here (that's what
+            # do_login() does) -- we're already mid-way through an OAuth redirect
+            # that was specifically tied to the "Register for the SAT" click, with
+            # its own client_id/redirect_uri/state. Abandoning it for a fresh
+            # generic login broke the expected "choose verification method" step.
+            # Instead, keep working on THIS page in place.
+            log("DEBUG full re-login required (session fully expired) -- handling in place")
+            email_el = page.query_selector("#input28")
+            if email_el:
+                email_el.fill(CB_EMAIL)
+                page.click("input[type=submit]", force=True)
+                try:
+                    page.wait_for_selector("text=Select from the following options", timeout=10000)
+                    page.click("a[aria-label='Select Password.']", force=True)
+                except Exception:
+                    log("DEBUG no method-picker shown, assuming password field appears directly")
+                pw_input = page.wait_for_selector("input[type=password]", timeout=15000)
+                pw_input.fill(CB_PASSWORD)
+                page.click("input[type=submit]", force=True)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass
+                time.sleep(3)
             content, text = dbg(page, "after_full_relogin")
 
         # the step-up challenge (or a flaky click) can bounce us back to the plain
