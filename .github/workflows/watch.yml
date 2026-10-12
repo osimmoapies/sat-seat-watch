@@ -1,0 +1,53 @@
+name: SAT seat watch
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sat-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Restore session cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            state.json
+            started.flag
+          key: sat-watch-state-v1
+
+      - name: Run check
+        env:
+          CB_EMAIL: ${{ secrets.CB_EMAIL }}
+          CB_PASSWORD: ${{ secrets.CB_PASSWORD }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          STATE_PATH: state.json
+          FLAG_PATH: started.flag
+        run: python3 check.py
+
+      - name: Save session cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            state.json
+            started.flag
+          key: sat-watch-state-v1
