@@ -190,6 +190,17 @@ def ensure_on_test_center_search(context, page):
                 pass
             time.sleep(5)
             content, text = dbg(page, "after_stepup_password")
+        elif "Sign In" in text and "Email Address" in text:
+            # the session fully expired (not just a step-up) -- a complete login
+            # form is shown (email+password), distinct from the partial
+            # password-only step-up handled above. Previously this silently fell
+            # through, leaving `content` pointed at the raw login page, which made
+            # the run quietly report "no seats" without ever reaching the real page.
+            log("DEBUG full re-login required (session fully expired)")
+            do_login(page)
+            page.goto("https://mysat.collegeboard.org/", wait_until="domcontentloaded", timeout=45000)
+            time.sleep(3)
+            content, text = dbg(page, "after_full_relogin")
 
         # the step-up challenge (or a flaky click) can bounce us back to the plain
         # dashboard instead of into the registration flow -- detect that and retry
@@ -198,9 +209,12 @@ def ensure_on_test_center_search(context, page):
         # "no seats" while never actually reaching the search page at all).
         on_bare_dashboard = ("Hello" in text and "Register for the SAT" in content
                               and "STEP 1 OF 4" not in content and "STEP 2 OF 4" not in content)
-        if not on_bare_dashboard:
+        # likewise, still being stuck on an auth page of any kind must never be
+        # mistaken for "we reached the search page and it's just empty"
+        still_on_auth_page = ("Sign In" in text and "Email Address" in text) or "Verify with your password" in text
+        if not on_bare_dashboard and not still_on_auth_page:
             break
-        log(f"DEBUG still on bare dashboard after entry attempt {entry_attempt}, retrying")
+        log(f"DEBUG still on dashboard/auth page after entry attempt {entry_attempt}, retrying")
     else:
         raise RuntimeError("COULD_NOT_ENTER_REGISTRATION_FLOW")
 
