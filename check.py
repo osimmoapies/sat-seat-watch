@@ -220,8 +220,15 @@ def ensure_on_test_center_search(context, page):
                     page.wait_for_load_state("networkidle", timeout=20000)
                 except Exception:
                     pass
-                time.sleep(3)
+                time.sleep(5)
             content, text = dbg(page, "after_full_relogin")
+            if len(text.strip()) < 20:
+                # this exact transition (fresh landing on mysat.collegeboard.org
+                # right after a full login) has repeatedly needed extra time + a
+                # second render-nudge beyond what dbg() already retries internally
+                log("DEBUG after_full_relogin came back empty, giving it more time")
+                time.sleep(4)
+                content, text = dbg(page, "after_full_relogin_retry")
 
         # the step-up challenge (or a flaky click) can bounce us back to the plain
         # dashboard instead of into the registration flow -- detect that and retry
@@ -233,8 +240,14 @@ def ensure_on_test_center_search(context, page):
         # likewise, still being stuck on an auth page of any kind must never be
         # mistaken for "we reached the search page and it's just empty"
         still_on_auth_page = ("Sign In" in text and "Email Address" in text) or "Verify with your password" in text
-        if not on_bare_dashboard and not still_on_auth_page:
+        # and an unrendered/blank page (the recurring visibility-timing issue on
+        # this site) must never be treated as "we arrived, there's just nothing
+        # here" -- that produced a false "no seats" with an empty RESULT SNIPPET
+        looks_blank = len(text.strip()) < 20
+        if not on_bare_dashboard and not still_on_auth_page and not looks_blank:
             break
+        if looks_blank:
+            log(f"DEBUG page came back blank after entry attempt {entry_attempt}, retrying")
         log(f"DEBUG still on dashboard/auth page after entry attempt {entry_attempt}, retrying")
     else:
         raise RuntimeError("COULD_NOT_ENTER_REGISTRATION_FLOW")
