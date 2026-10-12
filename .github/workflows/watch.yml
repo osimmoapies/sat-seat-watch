@@ -31,7 +31,10 @@ jobs:
           path: |
             state.json
             started.flag
-          key: sat-watch-state-v1
+            started.flag.school_asked
+          key: sat-watch-state-${{ github.run_id }}
+          restore-keys: |
+            sat-watch-state-
 
       - name: Run check
         env:
@@ -50,4 +53,5 @@ jobs:
           path: |
             state.json
             started.flag
-          key: sat-watch-state-v1
+            started.flag.school_asked
+          key: sat-watch-state-${{ github.run_id }}

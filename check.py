@@ -214,9 +214,13 @@ def ensure_on_test_center_search(context, page):
             still_disabled = btn.is_disabled() if btn else True
             if no_results and still_disabled:
                 log("BLOCKED: school name is empty and required -- cannot safely guess a formal school name")
-                tg("🟡 Нужна твоя помощь: на шаге School Information поле 'Name of your high school' пустое и обязательное. "
-                   "Зайди сам один раз на https://satreg.collegeboard.org/register/personalInformation , впиши название школы, "
-                   "выбери её из списка и нажми Continue. После этого один раз — мониторинг дальше пойдёт автоматически.")
+                asked_flag = FLAG_PATH + ".school_asked"
+                if not os.path.exists(asked_flag):
+                    tg("🟡 Нужна твоя помощь (разово): на шаге School Information поле 'Name of your high school' пустое и обязательное. "
+                       "Зайди сам один раз на https://satreg.collegeboard.org/register/personalInformation , впиши название школы, "
+                       "выбери её из списка и нажми Continue. После этого мониторинг дальше пойдёт automatически, больше писать не буду.")
+                    with open(asked_flag, "w") as f:
+                        f.write("asked")
                 raise RuntimeError("NEEDS_SCHOOL_NAME_INPUT")
             if btn and not btn.is_disabled():
                 btn.click(force=True)
