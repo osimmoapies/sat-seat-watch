@@ -327,11 +327,14 @@ def main():
             page = ensure_on_test_center_search(context, page)
         except Exception as e:
             log("FATAL during flow:", e)
-            if str(e) != "NEEDS_SCHOOL_NAME_INPUT":
+            expected_pause = str(e) == "NEEDS_SCHOOL_NAME_INPUT"
+            if not expected_pause:
                 tg(f"🔴 SAT-мониторинг (облако): ошибка при проверке — {e}")
             context.storage_state(path=STATE_PATH)
             browser.close()
-            sys.exit(1)
+            # expected pause (waiting on the owner to fill the school field) must NOT
+            # be reported as a workflow failure, or GitHub emails on every 5-min run
+            sys.exit(0 if expected_pause else 1)
 
         body_text = page.inner_text("body")
         idx = body_text.find("Find a Test Center")
