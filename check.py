@@ -153,41 +153,56 @@ def ensure_on_test_center_search(context, page):
         time.sleep(3)
         content, text = dbg(page, "mysat_after_login")
 
-    start_url = page.url
-    for attempt in range(4):
-        try:
-            with context.expect_page(timeout=5000) as new_page_info:
-                page.evaluate("""
-                    () => {
-                        var btns = Array.from(document.querySelectorAll('button,a'));
-                        var btn = btns.find(b => /register for the sat/i.test(b.innerText||''));
-                        if (btn) btn.click();
-                    }
-                """)
-            page = new_page_info.value
-            page.wait_for_load_state("domcontentloaded", timeout=20000)
-            log(f"DEBUG js-click opened new tab (attempt {attempt}):", page.url)
-            break
-        except Exception as e:
-            log(f"DEBUG js-click attempt {attempt} did not open new tab:", type(e).__name__)
+    content, text = "", ""
+    for entry_attempt in range(3):
+        start_url = page.url
+        for attempt in range(4):
+            try:
+                with context.expect_page(timeout=5000) as new_page_info:
+                    page.evaluate("""
+                        () => {
+                            var btns = Array.from(document.querySelectorAll('button,a'));
+                            var btn = btns.find(b => /register for the sat/i.test(b.innerText||''));
+                            if (btn) btn.click();
+                        }
+                    """)
+                page = new_page_info.value
+                page.wait_for_load_state("domcontentloaded", timeout=20000)
+                log(f"DEBUG js-click opened new tab (entry {entry_attempt}, attempt {attempt}):", page.url)
+                break
+            except Exception as e:
+                log(f"DEBUG js-click entry {entry_attempt} attempt {attempt} did not open new tab:", type(e).__name__)
+            time.sleep(3)
+            if page.url != start_url:
+                log(f"DEBUG same-page navigation happened (entry {entry_attempt}, attempt {attempt}):", page.url)
+                break
         time.sleep(3)
-        if page.url != start_url:
-            log(f"DEBUG same-page navigation happened (attempt {attempt}):", page.url)
-            break
-    time.sleep(3)
-    content, text = dbg(page, "after_entry_click")
+        content, text = dbg(page, "after_entry_click")
 
-    if "Verify with your password" in text or ("Password" in text and "Forgot password" in text):
-        log("DEBUG step-up password re-verification required")
-        pw_input = page.wait_for_selector("input[type=password]", timeout=15000)
-        pw_input.fill(CB_PASSWORD)
-        page.click("input[type=submit]", force=True)
-        try:
-            page.wait_for_load_state("networkidle", timeout=20000)
-        except Exception:
-            pass
-        time.sleep(5)
-        content, text = dbg(page, "after_stepup_password")
+        if "Verify with your password" in text or ("Password" in text and "Forgot password" in text):
+            log("DEBUG step-up password re-verification required")
+            pw_input = page.wait_for_selector("input[type=password]", timeout=15000)
+            pw_input.fill(CB_PASSWORD)
+            page.click("input[type=submit]", force=True)
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            time.sleep(5)
+            content, text = dbg(page, "after_stepup_password")
+
+        # the step-up challenge (or a flaky click) can bounce us back to the plain
+        # dashboard instead of into the registration flow -- detect that and retry
+        # the "Register for the SAT" click again instead of silently proceeding as
+        # if we were on the right page (that previously caused a run to report
+        # "no seats" while never actually reaching the search page at all).
+        on_bare_dashboard = ("Hello" in text and "Register for the SAT" in content
+                              and "STEP 1 OF 4" not in content and "STEP 2 OF 4" not in content)
+        if not on_bare_dashboard:
+            break
+        log(f"DEBUG still on bare dashboard after entry attempt {entry_attempt}, retrying")
+    else:
+        raise RuntimeError("COULD_NOT_ENTER_REGISTRATION_FLOW")
 
     if "Own Your Future with the Digital SAT" in content:
         page, _ = click_maybe_newtab(context, page, ["button:has-text('Get Started')"])
