@@ -351,14 +351,64 @@ def main():
 
         if has_center and not no_seats:
             log("SEAT AVAILABLE - attempting reserve")
-            tg("🟢🟢🟢 МЕСТО В ДУШАНБЕ НА 5 ДЕКАБРЯ ПОЯВИЛОСЬ! (обнаружено облачным мониторингом) Пытаюсь забронировать...")
-            sel_btn = page.query_selector("button:has-text('Select'), a:has-text('Select'), button:has-text('Reserve')")
+            tg("🟢🟢🟢 МЕСТО В ДУШАНБЕ НА 5 ДЕКАБРЯ ПОЯВИЛОСЬ! Пытаюсь забронировать прямо сейчас — жди второе сообщение с реальным статусом.")
+
+            url_before = page.url
+            text_before = page.inner_text("body")
+
+            # scope the click to the actual result row (Qsi International...), not the
+            # whole page -- avoids matching an unrelated "Select"/"Reserve" text elsewhere
+            row_handle = page.evaluate_handle("""
+                () => {
+                    var all = Array.from(document.querySelectorAll('*'));
+                    return all.find(e => /Qsi International/i.test(e.innerText||'') && e.innerText.length < 2000) || null;
+                }
+            """)
+            row_el = row_handle.as_element()
+            sel_btn = None
+            if row_el:
+                sel_btn = row_el.query_selector("button:has-text('Select'), a:has-text('Select'), button:has-text('Reserve')")
+            if not sel_btn:
+                sel_btn = page.query_selector("button:has-text('Select'), a:has-text('Reserve')")
+
+            reserved_ok = False
+            detail = ""
             if sel_btn:
                 sel_btn.click(force=True)
                 time.sleep(3)
-                tg("Бронь нажата. ИДИ К КОМПЬЮТЕРУ — 20 минут на фото и оплату $68, иначе бронь сгорит.")
+                # this site requires a page-level Continue after Select on every other
+                # step (date, school info, terms) -- almost certainly true here too.
+                # Find a continue-ish id while explicitly excluding the session/timeout modal's.
+                cont_id = page.evaluate("""
+                    () => {
+                        var ids = Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]')).map(e => e.id);
+                        return ids.find(id => id && !/session|timeout/i.test(id)) || null;
+                    }
+                """)
+                if cont_id:
+                    btn = page.query_selector(f"#{cont_id}")
+                    if btn and not btn.is_disabled():
+                        btn.click(force=True)
+                        time.sleep(4)
+                page.bring_to_front()
+                time.sleep(1)
+                url_after = page.url
+                text_after = page.inner_text("body")
+                changed = (url_after != url_before) or (text_after != text_before)
+                looks_confirmed = any(k in text_after for k in ["photo", "Photo", "payment", "Payment", "upload", "Upload"]) or url_after != url_before
+                reserved_ok = changed and looks_confirmed
+                detail = f"url_before={url_before} url_after={url_after} text_after_preview={text_after[:300]}"
+                log("RESERVE ATTEMPT RESULT:", detail)
             else:
-                tg("Место видно, но кнопку бронирования найти не смог — заходи и бронируй вручную ПРЯМО СЕЙЧАС: https://satreg.collegeboard.org/register/testCenterSearch")
+                detail = "no Select/Reserve button found in the result row"
+                log(detail)
+
+            if reserved_ok:
+                tg("✅ Бронь похожа на успешную (страница сдвинулась дальше). ИДИ К КОМПЬЮТЕРУ СЕЙЧАС — "
+                   "20 минут на фото и оплату $68, иначе бронь сгорит: https://satreg.collegeboard.org/register/testCenterSearch")
+            else:
+                tg(f"⚠️ НЕ УВЕРЕН, что бронь прошла — проверить не смог. Заходи СЕЙЧАС САМ и бронируй вручную: "
+                   f"https://satreg.collegeboard.org/register/testCenterSearch (детали: {detail[:200]})")
         else:
             log("no seats this run")
 
