@@ -1,0 +1,77 @@
+"""Offline checks of check.py's seat probe against fake result pages.
+
+Run locally (needs `pip install playwright && playwright install chromium`):
+    python3 tests/test_probe.py
+No network, no credentials -- every page here is a local fixture.
+"""
+import os
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for k in ["CB_EMAIL", "CB_PASSWORD", "TG_BOT_TOKEN", "TG_CHAT_ID"]:
+    os.environ.setdefault(k, "dummy")
+sys.path.insert(0, REPO)
+import check  # noqa: E402
+from playwright.sync_api import sync_playwright  # noqa: E402
+
+# a deliberately hostile page around the result card: a Dushanbe mention in a
+# <script>, a hidden old wizard step with a "Select" button, an autocomplete list
+# mentioning Dushanbe, and a stepper BUTTON whose text starts with "Select"
+HEAD = """<html><head><title>SAT</title>
+<script>window.__STATE__ = {"city": "Dushanbe", "school": "Qsi International"};</script></head><body>
+<div id="stepper">STEP 2 OF 4 <button>Select Date and Test Center</button></div>
+<div id="hidden-old-step" style="display:none"><button>Select</button> Dushanbe</div>
+<div id="form">Choose your test location <input id="test-center-country-city-input" value="Dushanbe">
+<ul id="autocomplete" style="position:absolute"><li>Dushanbe, Tajikistan</li></ul>
+<select id="country"><option>Tajikistan</option><option>Turkey</option></select>
+<button id="test-center-country-find-button-enabled">Find</button></div>
+<div id="results">Find a Test Center View your (N) search results. <button>Filter</button>
+"""
+TAIL = """<nav>Go to previous page page 1 Go to next page</nav>
+<button id="back">Back</button><button id="cont-continue">Continue</button></div></body></html>"""
+
+
+def card(name, addr, inner):
+    return f"""<div class="card"><h3>{name}</h3><p>Saturday, December 5, 2026</p>
+<a href="#">click here to open the address in Google Maps</a><p>{addr}</p>{inner}</div>"""
+
+
+QSI = ("Qsi International School Of Dushanbe", "3 Turakul Zehni Street, Dushanbe, Tajikistan, 20521")
+KHU = ("Khujand Lyceum", "1 Lenin St, Khujand, Tajikistan")
+NO = "<p>No seats available.</p>"
+
+CASES = {
+    "live-like no seats": ([card(*QSI, NO)], "no_seats"),
+    "seat: <button>Select</button>": ([card(*QSI, "<button>Select</button>")], "button"),
+    "seat: div[role=button] Select": ([card(*QSI, "<div role='button' tabindex=0>Select</div>")], "button"),
+    "seat: aria-label only": ([card(*QSI, "<button aria-label='Select this test center'><svg width=10 height=10></svg></button>")], "button"),
+    "seat: radio only (unrecognised)": ([card(*QSI, "<label><input type=radio name=c> Choose</label>")], "unknown"),
+    "seat btn disabled, no text": ([card(*QSI, "<button disabled>Select</button>")], "unknown"),
+    "seat btn aria-disabled": ([card(*QSI, "<button aria-disabled='true'>Select</button>")], "unknown"),
+    "other center has seat, QSI none": ([card(*KHU, "<button>Select</button>"), card(*QSI, NO)], "no_seats"),
+    "QSI has seat, other center none": ([card(*KHU, NO), card(*QSI, "<button>Select</button>")], "button"),
+    "QSI absent, other center seat": ([card(*KHU, "<button>Select</button>")], "?"),
+    "no results at all": ([], "?"),
+}
+
+
+def main():
+    with sync_playwright() as p:
+        b = p.chromium.launch(headless=True)
+        pg = b.new_page()
+        bad = 0
+        for name, (cards, want) in CASES.items():
+            pg.set_content(HEAD + "".join(cards) + TAIL)
+            info, _btn = check.probe_seat_state(pg)
+            got = info["verdict"]
+            ok = (want == "?") or (got == want)
+            bad += not ok
+            print(f"{'OK ' if ok else 'BAD'} {name:38s} want={want:9s} got={got:9s} btn={info['btn_label']!r} "
+                  f"card={info['card_tag']} len={info['card_len']} starts={info['starts']}")
+        b.close()
+    print("FAILURES:", bad)
+    return bad
+
+
+if __name__ == "__main__":
+    sys.exit(1 if main() else 0)

@@ -231,6 +231,39 @@ def click_maybe_newtab(context, page, selectors):
     return page, None
 
 
+def click_el_maybe_newtab(context, page, el, label):
+    # element-handle variant of click_maybe_newtab, for the reserve clicks
+    try:
+        with context.expect_page(timeout=4000) as new_page_info:
+            el.click(force=True, timeout=10000)
+        new_page = new_page_info.value
+        new_page.wait_for_load_state("domcontentloaded", timeout=20000)
+        log(f"DEBUG {label} click opened a new tab:", new_page.url)
+        return new_page
+    except Exception as e:
+        # the usual case is simply "no new tab within 4s"; log anything else
+        if "Timeout" not in type(e).__name__:
+            log(f"DEBUG {label} click raised:", repr(e)[:200])
+        return page
+
+
+# The page-level Continue for the reserve step: enabled, actually rendered, and
+# not a stale/foreign one (session-timeout modal, earlier wizard steps). Falls back
+# to a rendered, enabled button labelled exactly "Continue" in case the id has no
+# "continue" in it.
+FIND_CONTINUE_JS = r"""
+() => {
+  const usable = e => e.getClientRects().length > 0 && !e.disabled
+                      && e.getAttribute('aria-disabled') !== 'true';
+  const byId = Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]')).find(e =>
+    e.id && !/session|timeout|personalinfo|testdate|termsconditions/i.test(e.id) && usable(e));
+  if (byId) return byId;
+  return Array.from(document.querySelectorAll('button')).find(b =>
+    (b.innerText || '').trim() === 'Continue' && !b.getAttribute('aria-describedby') && usable(b)) || null;
+}
+"""
+
+
 def ensure_on_test_center_search(context, page):
     page.goto("https://mysat.collegeboard.org/", wait_until="domcontentloaded", timeout=45000)
     time.sleep(3)
@@ -782,17 +815,19 @@ def main():
             # has_center silently read False and cause a real seat to be missed
             # entirely (seat_available requires has_center AND a real button).
             has_center = ("Dushanbe" in body_text) or ("Qsi International" in body_text)
-            no_seats_text = "No seats available" in body_text
             date_ok = bool(TEST_DATE_RE.search(body_text))
 
-            # card-scoped detector, run in SHADOW mode for now: logged next to the
-            # existing row logic below so its verdict on the real page is confirmed
-            # before it is allowed to decide anything
-            try:
-                probe_info, _probe_btn = probe_seat_state(page)
-            except Exception as pe:
-                probe_info = {"error": str(pe)[:200]}
-            log("DEBUG seat probe (shadow):", probe_info)
+            # the card-scoped probe decides (its verdict was checked in shadow mode
+            # against the real page first: 'no_seats' on the QSI card itself). It
+            # replaced "first element in document order whose text mentions
+            # Dushanbe and is < 2000 chars" + has-text('Select'): on any shorter page
+            # that element is a top-level container, so an unrelated control like
+            # a "Select Date and Test Center" stepper link counted as a seat
+            # (reproduced offline) -- a false seat alert plus a reserve click on
+            # the wrong element.
+            probe_info, sel_btn = probe_seat_state(page)
+            verdict = probe_info["verdict"]
+            log("DEBUG seat probe:", probe_info)
             # dry run of what the (never live-tested) reserve path would see when it
             # looks for its Continue button -- reveals stale ids from earlier steps
             try:
@@ -810,37 +845,17 @@ def main():
                 with open(FLAG_PATH, "w") as f:
                     f.write("started")
 
-            # scope the click to the actual result row, not the whole page -- avoids
-            # matching an unrelated "Select"/"Reserve" text elsewhere. Match on
-            # Dushanbe too (not just the exact school name), consistent with the
-            # has_center check above, in case the row text ever varies slightly.
-            row_handle = page.evaluate_handle("""
-                () => {
-                    var all = Array.from(document.querySelectorAll('*'));
-                    return all.find(e => /Qsi International|Dushanbe/i.test(e.innerText||'') && e.innerText.length < 2000) || null;
-                }
-            """)
-            row_el = row_handle.as_element()
-            sel_btn = None
-            if row_el:
-                sel_btn = row_el.query_selector("button:has-text('Select'), a:has-text('Select'), button:has-text('Reserve')")
-            if sel_btn and sel_btn.is_disabled():
-                # a disabled button present in the row is not an actionable seat --
-                # without this check a greyed-out button would still flip
-                # seat_available to True below and fire a false "место появилось"
-                # alert for something that can't actually be clicked through.
-                sel_btn = None
-
-            # the PRIMARY signal is a real clickable button in the row, not the absence of a
-            # specific phrase -- that phrase could change wording and silently break this
-            # check forever, causing a false "seat available" alert on every single run.
-            seat_available = has_center and sel_btn is not None
-            results_seen = has_center and date_ok
+            # the PRIMARY signal is a real, enabled Select/Reserve control in the
+            # center's own card (the probe already excludes disabled/aria-disabled
+            # ones), not the absence of a specific phrase -- that phrase could change
+            # wording and break this check forever.
+            seat_available = verdict == "button"
+            results_seen = date_ok and verdict != "absent"
 
             if results_seen:
                 clear_blind_state()
             else:
-                note_blind_run(f"has_center={has_center} date_ok={date_ok} url={page.url}")
+                note_blind_run(f"verdict={verdict} has_center={has_center} date_ok={date_ok} url={page.url}")
                 exit_code = 1
 
             if seat_available and not date_ok:
@@ -853,18 +868,18 @@ def main():
                              "сам НЕ бронирую. Проверь СЕЙЧАС вручную: https://satreg.collegeboard.org/register/testCenterSearch",
                              1800)
                 seat_available = False
-            elif results_seen and not seat_available and not no_seats_text:
-                # the Dushanbe row is there but no longer says "No seats available",
-                # yet no Select/Reserve <button>/<a> was recognised -- e.g. the seat
-                # control renders as a radio, a div[role=button], or other wording.
-                # This used to be log-only, i.e. the exact moment a seat most likely
-                # appeared was the one case that never reached the owner.
+            elif results_seen and verdict == "unknown":
+                # the Dushanbe card is there but no longer says "No seats available",
+                # yet no Select/Reserve control was recognised -- e.g. the seat
+                # control renders as a radio or uses other wording. This used to be
+                # log-only, i.e. the exact moment a seat most likely appeared was
+                # the one case that never reached the owner.
                 log("WARNING: unrecognised result-row state (neither 'no seats' text nor a button found) -- site text may have changed:", snippet[:300])
                 tg_throttled(UNKNOWN_ALERT_PATH,
                              "🟢❓ В строке Душанбе (5 декабря) больше НЕТ надписи «No seats available», но кнопку "
                              "брони я не распознал — ВОЗМОЖНО, МЕСТО ЕСТЬ. Проверь СЕЙЧАС вручную: "
                              "https://satreg.collegeboard.org/register/testCenterSearch", 1800)
-            elif results_seen and no_seats_text and not seat_available:
+            elif results_seen and verdict == "no_seats":
                 # back to the plain, recognised "no seats" state: re-arm the alert
                 remove_flag(UNKNOWN_ALERT_PATH)
 
@@ -882,47 +897,49 @@ def main():
                 # is very plausible here too, and this reserve click has never been
                 # exercised against a real seat to rule it out. If it DID open a new
                 # tab and this kept operating on the old, abandoned page, every check
-                # below (cont_id, text_after) would silently read the wrong page at
-                # the single highest-stakes moment in the whole script.
-                try:
-                    with context.expect_page(timeout=4000) as new_page_info:
-                        sel_btn.click(force=True)
-                    page = new_page_info.value
-                    page.wait_for_load_state("domcontentloaded", timeout=20000)
-                    log("DEBUG reserve Select click opened a new tab:", page.url)
-                except Exception:
-                    pass
-                time.sleep(3)
+                # below (continue button, text_after) would silently read the wrong
+                # page at the single highest-stakes moment in the whole script.
+                page = click_el_maybe_newtab(context, page, sel_btn, "reserve Select")
                 # this site requires a page-level Continue after Select on every other
                 # step (date, school info, terms) -- almost certainly true here too.
-                # Find a continue-ish id, excluding the session/timeout modal's AND any
-                # stale Step-1 ("personalinfo") button this wizard keeps mounted from
-                # earlier steps -- the exact kind of stale-button mismatch already
-                # found and fixed once for the school-info step, now guarded against
-                # here too since this is the single highest-stakes click in the script.
-                cont_id = page.evaluate("""
-                    () => {
-                        var els = Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]'));
-                        var el = els.find(e => e.id && !/session|timeout|personalinfo/i.test(e.id) && !e.disabled);
-                        return el ? el.id : null;
-                    }
-                """)
-                if cont_id:
-                    btn = page.query_selector(f"#{cont_id}")
-                    if btn and not btn.is_disabled():
-                        btn.click(force=True)
-                        time.sleep(4)
+                # Live, the results page's only continue-ish element is
+                # "test-location-continue-disabled" (disabled until a center is
+                # picked), so poll for an enabled one instead of a blind 3s sleep
+                # that a slow re-render would simply miss.
+                cont_el = None
+                for _ in range(10):
+                    cont_el = page.evaluate_handle(FIND_CONTINUE_JS).as_element()
+                    if cont_el:
+                        break
+                    time.sleep(1)
+                if cont_el:
+                    log("DEBUG reserve Continue:", cont_el.get_attribute("id"), (cont_el.inner_text() or "")[:30])
+                    page = click_el_maybe_newtab(context, page, cont_el, "reserve Continue")
+                    try:
+                        page.wait_for_function(
+                            "() => /STEP [34] OF 4|photo|payment/i.test(document.body.innerText)",
+                            timeout=15000, polling=500)
+                    except Exception:
+                        log("DEBUG no photo/payment step text within 15s of Continue")
+                else:
+                    log("WARNING: no enabled Continue appeared within 10s of the Select click")
                 page.bring_to_front()
                 time.sleep(1)
                 url_after = page.url
                 text_after = page.inner_text("body")
-                # require a SPECIFIC positive signal (photo/payment step), not just
-                # "something changed" -- a bare URL change could just as easily mean
-                # the session timed out or an error page loaded, which would have
-                # falsely confirmed a reservation that never actually happened at
-                # the single moment this matters most.
-                looks_confirmed = any(k in text_after for k in ["photo", "Photo", "payment", "Payment", "upload", "Upload"])
-                looks_like_error_or_login = ("Sign In" in text_after and "Email Address" in text_after) or "error" in text_after.lower()
+                # require a SPECIFIC positive signal (the next wizard step: photo /
+                # payment), not just "something changed" -- a bare URL change could
+                # just as easily mean the session timed out or an error page loaded.
+                # And it must be NEW relative to the results page: a word like
+                # "photo" already present there (e.g. a "bring photo ID" note) would
+                # otherwise "confirm" a reservation even if both clicks did nothing.
+                def newly(k, case_insensitive=False):
+                    if case_insensitive:
+                        return k.lower() in text_after.lower() and k.lower() not in text_before.lower()
+                    return k in text_after and k not in text_before
+                looks_confirmed = any(newly(k) for k in ["STEP 3 OF 4", "STEP 4 OF 4"]) or \
+                    any(newly(k, True) for k in ["photo", "payment", "upload"])
+                looks_like_error_or_login = ("Sign In" in text_after and "Email Address" in text_after) or newly("error", True)
                 reserved_ok = looks_confirmed and not looks_like_error_or_login
                 detail = f"url_before={url_before} url_after={url_after} text_after_preview={text_after[:300]}"
                 log("RESERVE ATTEMPT RESULT:", detail)
@@ -938,7 +955,7 @@ def main():
                     # so GitHub's failed-workflow email is a last-resort channel
                     log("SEAT ALERT NOT DELIVERED -- failing the run so GitHub emails the owner")
                     exit_code = 1
-            elif results_seen and no_seats_text:
+            elif results_seen and verdict == "no_seats":
                 log("no seats this run")
             else:
                 log("seats NOT confirmed absent this run (see WARNING above)")
