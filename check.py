@@ -572,11 +572,16 @@ def main():
                 time.sleep(3)
                 # this site requires a page-level Continue after Select on every other
                 # step (date, school info, terms) -- almost certainly true here too.
-                # Find a continue-ish id while explicitly excluding the session/timeout modal's.
+                # Find a continue-ish id, excluding the session/timeout modal's AND any
+                # stale Step-1 ("personalinfo") button this wizard keeps mounted from
+                # earlier steps -- the exact kind of stale-button mismatch already
+                # found and fixed once for the school-info step, now guarded against
+                # here too since this is the single highest-stakes click in the script.
                 cont_id = page.evaluate("""
                     () => {
-                        var ids = Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]')).map(e => e.id);
-                        return ids.find(id => id && !/session|timeout/i.test(id)) || null;
+                        var els = Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]'));
+                        var el = els.find(e => e.id && !/session|timeout|personalinfo/i.test(e.id) && !e.disabled);
+                        return el ? el.id : null;
                     }
                 """)
                 if cont_id:
@@ -588,9 +593,14 @@ def main():
                 time.sleep(1)
                 url_after = page.url
                 text_after = page.inner_text("body")
-                changed = (url_after != url_before) or (text_after != text_before)
-                looks_confirmed = any(k in text_after for k in ["photo", "Photo", "payment", "Payment", "upload", "Upload"]) or url_after != url_before
-                reserved_ok = changed and looks_confirmed
+                # require a SPECIFIC positive signal (photo/payment step), not just
+                # "something changed" -- a bare URL change could just as easily mean
+                # the session timed out or an error page loaded, which would have
+                # falsely confirmed a reservation that never actually happened at
+                # the single moment this matters most.
+                looks_confirmed = any(k in text_after for k in ["photo", "Photo", "payment", "Payment", "upload", "Upload"])
+                looks_like_error_or_login = ("Sign In" in text_after and "Email Address" in text_after) or "error" in text_after.lower()
+                reserved_ok = looks_confirmed and not looks_like_error_or_login
                 detail = f"url_before={url_before} url_after={url_after} text_after_preview={text_after[:300]}"
                 log("RESERVE ATTEMPT RESULT:", detail)
 
