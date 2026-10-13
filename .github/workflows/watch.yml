@@ -27,14 +27,15 @@ jobs:
           pip install playwright
           playwright install --with-deps chromium
 
+      # started.flag* is a glob on purpose: check.py keeps all its per-episode
+      # alert/throttle state in started.flag.<name> files, and an explicit list
+      # here silently dropped any new one between runs (resetting its throttle)
       - name: Restore session cache
         uses: actions/cache/restore@v4
         with:
           path: |
             state.json
-            started.flag
-            started.flag.school_asked
-            started.flag.blocked_alerted
+            started.flag*
           key: sat-watch-state-${{ github.run_id }}
           restore-keys: |
             sat-watch-state-
@@ -55,7 +56,5 @@ jobs:
         with:
           path: |
             state.json
-            started.flag
-            started.flag.school_asked
-            started.flag.blocked_alerted
+            started.flag*
           key: sat-watch-state-${{ github.run_id }}

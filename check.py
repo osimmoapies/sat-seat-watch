@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -14,8 +15,18 @@ TG_CHAT_ID = os.environ["TG_CHAT_ID"]
 STATE_PATH = os.environ.get("STATE_PATH", "state.json")
 FLAG_PATH = os.environ.get("FLAG_PATH", "started.flag")
 BLOCK_FLAG_PATH = FLAG_PATH + ".blocked_alerted"
+# all state files share the FLAG_PATH prefix so watch.yml's `started.flag*`
+# cache glob persists every one of them between runs without a per-file list
+ERROR_ALERT_PATH = FLAG_PATH + ".error_alerted"
+BLIND_COUNT_PATH = FLAG_PATH + ".blind_count"
+BLIND_ALERT_PATH = FLAG_PATH + ".blind_alerted"
+UNKNOWN_ALERT_PATH = FLAG_PATH + ".unknown_alerted"
 
 TEST_DATE_BUTTON_ID = "qc-id-selectdatecenter-testdate-button-DEC-05"
+# the results page repeats the selected date ("Saturday, December 5, 2026") --
+# requiring it guards against reading results for a different date the site
+# remembered from an earlier (e.g. manual) session
+TEST_DATE_RE = re.compile(r"Dec(ember)?\.? 5,? 2026")
 
 REALISTIC_USER_AGENT = (
     # must match the ACTUAL platform (this runs on Linux in GitHub Actions) --
@@ -53,11 +64,44 @@ def tg(text):
     for attempt in range(3):
         try:
             urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=15)
-            return
+            return True
         except Exception as e:
             print(f"TG SEND FAILED (attempt {attempt + 1}/3):", e)
             if attempt < 2:
                 time.sleep(3)
+    return False
+
+
+def read_ts(path):
+    # timestamp stored INSIDE the file -- file mtimes aren't something to rely
+    # on after an actions/cache round-trip
+    try:
+        with open(path) as f:
+            return float(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return None
+
+
+def write_ts(path):
+    with open(path, "w") as f:
+        f.write(str(time.time()))
+
+
+def remove_flag(path):
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def tg_throttled(flag_path, text, min_interval):
+    # repeating the same non-seat alert every 5 minutes trains the owner to mute
+    # the bot -- and a muted bot is how the one alert that matters (seat found)
+    # gets missed. Send once, then at most every min_interval while it persists.
+    last = read_ts(flag_path)
+    if last is not None and time.time() - last < min_interval:
+        log(f"alert throttled (last sent {int(time.time() - last)}s ago):", text[:100])
+        return
+    if tg(text):
+        write_ts(flag_path)
 
 
 def log(*a):
@@ -464,7 +508,9 @@ def ensure_on_test_center_search(context, page):
                 debug_info = page.evaluate("""
                     () => {
                         var allSelects = Array.from(document.querySelectorAll('select')).map(s => ({id:s.id, value:s.value, options: Array.from(s.options).map(o=>({v:o.value,t:o.text}))}));
-                        var allInputs = Array.from(document.querySelectorAll('input')).filter(i=>i.type!=='hidden'&&i.type!=='checkbox').map(i => ({id:i.id, value:i.value, type:i.type}));
+                        // never dump password fields: getting stuck right after the
+                        // step-up/full re-login fill would print CB_PASSWORD's value
+                        var allInputs = Array.from(document.querySelectorAll('input')).filter(i=>i.type!=='hidden'&&i.type!=='checkbox'&&i.type!=='password').map(i => ({id:i.id, value:i.value, type:i.type}));
                         return {selects: allSelects, inputs: allInputs, bodyTextFull: document.body.innerText.slice(0, 1500)};
                     }
                 """)
@@ -546,9 +592,109 @@ def ensure_on_test_center_search(context, page):
         if find_btn:
             find_btn.click(force=True)
             time.sleep(4)
+            # the fixed 4s alone raced a slow results render: the page was read
+            # before any result row existed, which is indistinguishable from
+            # "no seats" -- give a slow response up to 15s more to show the row
+            try:
+                page.wait_for_function(
+                    "() => /No seats available|Qsi International/i.test(document.body.innerText)",
+                    timeout=15000, polling=500)
+            except Exception:
+                log("WARNING: no result row rendered within ~19s of the Find click")
             dbg(page, "after_find_click")
 
     return page
+
+
+# Decides seat state from the result card itself. Starts from the deepest
+# rendered elements that name the center and walks UP to the first ancestor that
+# holds either "No seats available" or an enabled Select/Reserve control -- i.e.
+# the center's own card -- so neither another center's row, a hidden wizard step,
+# nor a <script>/autocomplete mention of "Dushanbe" can decide it.
+# "No seats available" is checked before the button at each level: an ancestor
+# wide enough to hold another center's Select button also holds this center's
+# "No seats available", and must not be read as a seat.
+SEAT_PROBE_JS = r"""
+() => {
+  const QSI_RE = /Qsi International/i, CITY_RE = /Dushanbe/i;
+  const NO_SEATS_RE = /No seats available/i;
+  const BTN_RE = /^\s*(select|reserve)\b/i;
+  const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'OPTION', 'SELECT', 'HEAD', 'TITLE']);
+  const rendered = el => el.getClientRects().length > 0;
+  const labelOf = el => (((el.innerText || el.value || '') + '').trim()
+                         || (el.getAttribute('aria-label') || '').trim());
+  const buttons = Array.from(document.querySelectorAll(
+      'button, a, [role=button], input[type=button], input[type=submit]'))
+    .filter(b => rendered(b) && BTN_RE.test(labelOf(b))
+                 && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+  const deepestMatching = re => {
+    const hits = new Set(Array.from(document.body.querySelectorAll('*')).filter(e =>
+      !SKIP.has(e.tagName) && re.test(e.textContent || '') && rendered(e) && re.test(e.innerText || '')));
+    return Array.from(hits).filter(e => !Array.from(e.children).some(c => hits.has(c)));
+  };
+  // the exact school name is authoritative when present; the city alone is only
+  // a fallback in case the name's wording changes
+  let starts = deepestMatching(QSI_RE);
+  if (starts.length === 0) starts = deepestMatching(CITY_RE);
+  let verdict = starts.length ? 'unknown' : 'absent', btn = null, card = null;
+  for (const start of starts) {
+    for (let el = start; el && el !== document.body; el = el.parentElement) {
+      const t = el.innerText || '';
+      if (t.length > 3000) break;
+      if (NO_SEATS_RE.test(t)) {
+        if (verdict !== 'button') { verdict = 'no_seats'; card = card || el; }
+        break;
+      }
+      const b = buttons.find(x => el.contains(x));
+      if (b) { verdict = 'button'; btn = b; card = el; break; }
+    }
+    if (verdict === 'button') break;
+  }
+  const cardText = card ? (card.innerText || '') : '';
+  return {
+    btn: btn,
+    info: {
+      verdict: verdict,
+      starts: starts.length,
+      page_select_buttons: buttons.length,
+      card_tag: card ? card.tagName + (card.id ? '#' + card.id : '') : null,
+      card_len: cardText.length,
+      card_preview: cardText.slice(0, 200).replace(/\s+/g, ' '),
+      btn_label: btn ? labelOf(btn).slice(0, 80) : null,
+    },
+  };
+}
+"""
+
+
+def probe_seat_state(page):
+    handle = page.evaluate_handle(SEAT_PROBE_JS)
+    info = handle.get_property("info").json_value()
+    btn = handle.get_property("btn").as_element()
+    return info, btn
+
+
+def note_blind_run(reason):
+    # this run never actually saw the Dushanbe/Dec 5 result row. It used to fall
+    # through to "no seats this run" -- a monitor that silently stopped seeing
+    # results looked exactly like a healthy one finding nothing, indefinitely.
+    log("WARNING: BLIND RUN -- seats were NOT actually checked this run:", reason)
+    n = int(read_ts(BLIND_COUNT_PATH) or 0) + 1
+    with open(BLIND_COUNT_PATH, "w") as f:
+        f.write(str(n))
+    # one miss can be a transient render hiccup; two in a row is a real outage
+    if n >= 2:
+        tg_throttled(BLIND_ALERT_PATH,
+                     f"🟠 SAT-мониторинг: {n} проверки подряд НЕ дошли до результатов поиска ({reason[:150]}). "
+                     "Места сейчас фактически НЕ проверяются — зайди проверь сам: "
+                     "https://satreg.collegeboard.org/register/testCenterSearch", 3600)
+
+
+def clear_blind_state():
+    if os.path.exists(BLIND_ALERT_PATH):
+        tg("✅ SAT-мониторинг снова видит результаты поиска по Душанбе — проверки идут нормально.")
+    remove_flag(BLIND_ALERT_PATH)
+    remove_flag(BLIND_COUNT_PATH)
 
 
 def main():
@@ -584,8 +730,10 @@ def main():
             # the current one) gets its own fresh alert instead of being
             # silenced forever by a flag left over from a past, now-resolved
             # block.
-            if os.path.exists(BLOCK_FLAG_PATH):
-                os.remove(BLOCK_FLAG_PATH)
+            remove_flag(BLOCK_FLAG_PATH)
+            # same for the error alert throttle: the next failure episode should
+            # alert immediately, not wait out an old episode's hour
+            remove_flag(ERROR_ALERT_PATH)
         except Exception as e:
             log("FATAL during flow:", e)
             expected_pause = str(e) == "NEEDS_SCHOOL_NAME_INPUT"
@@ -597,19 +745,30 @@ def main():
                 # This run still exits 0 so GitHub doesn't flag it as a workflow
                 # failure; the next scheduled run tries again on its own.
                 if not os.path.exists(BLOCK_FLAG_PATH):
-                    tg("🔴 Сайт College Board похоже временно блокирует/проверяет автоматические запросы. "
-                       "Мониторинг продолжит пробовать сам, но если это не проходит долго — возможно, нужно подождать "
-                       "или проверить вручную.")
-                    with open(BLOCK_FLAG_PATH, "w") as f:
-                        f.write("alerted")
+                    # only mark it alerted if the alert actually went out --
+                    # otherwise one failed send silenced this whole episode
+                    if tg("🔴 Сайт College Board похоже временно блокирует/проверяет автоматические запросы. "
+                          "Мониторинг продолжит пробовать сам, но если это не проходит долго — возможно, нужно подождать "
+                          "или проверить вручную."):
+                        with open(BLOCK_FLAG_PATH, "w") as f:
+                            f.write("alerted")
             elif not expected_pause:
-                tg(f"🔴 SAT-мониторинг (облако): ошибка при проверке — {e}")
-            context.storage_state(path=STATE_PATH)
-            browser.close()
+                # was sent on EVERY failing run (every 5 min while e.g. login is
+                # broken) -- enough noise to get the bot muted, which would also
+                # mute the seat alert. Once per episode, then hourly reminders.
+                tg_throttled(ERROR_ALERT_PATH, f"🔴 SAT-мониторинг (облако): ошибка при проверке — {e}", 3600)
+            try:
+                context.storage_state(path=STATE_PATH)
+                browser.close()
+            except Exception as close_err:
+                log("could not save state/close browser after failure:", close_err)
             # expected pause (waiting on the owner to fill the school field) must NOT
             # be reported as a workflow failure, or GitHub emails on every 5-min run
             sys.exit(0 if (expected_pause or site_blocked) else 1)
 
+        exit_code = 0
+        seat_stage = False
+        seat_alert_ok = result_alert_ok = False
         try:
             body_text = page.inner_text("body")
             idx = body_text.find("Find a Test Center")
@@ -624,6 +783,27 @@ def main():
             # entirely (seat_available requires has_center AND a real button).
             has_center = ("Dushanbe" in body_text) or ("Qsi International" in body_text)
             no_seats_text = "No seats available" in body_text
+            date_ok = bool(TEST_DATE_RE.search(body_text))
+
+            # card-scoped detector, run in SHADOW mode for now: logged next to the
+            # existing row logic below so its verdict on the real page is confirmed
+            # before it is allowed to decide anything
+            try:
+                probe_info, _probe_btn = probe_seat_state(page)
+            except Exception as pe:
+                probe_info = {"error": str(pe)[:200]}
+            log("DEBUG seat probe (shadow):", probe_info)
+            # dry run of what the (never live-tested) reserve path would see when it
+            # looks for its Continue button -- reveals stale ids from earlier steps
+            try:
+                cont_candidates = page.evaluate("""
+                    () => Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]')).map(e => ({
+                        id: e.id, disabled: !!e.disabled, rendered: e.getClientRects().length > 0,
+                        text: (e.innerText || '').trim().slice(0, 30)}))
+                """)
+                log("DEBUG continue-ish ids on results page:", cont_candidates)
+            except Exception as ce:
+                log("DEBUG continue-ish ids lookup failed:", ce)
 
             if not os.path.exists(FLAG_PATH):
                 tg("🟡 SAT-мониторинг в облаке (GitHub Actions) запущен и работает. Проверка каждые ~5 минут, независимо от твоего Mac.")
@@ -655,16 +835,43 @@ def main():
             # specific phrase -- that phrase could change wording and silently break this
             # check forever, causing a false "seat available" alert on every single run.
             seat_available = has_center and sel_btn is not None
+            results_seen = has_center and date_ok
 
-            if has_center and not seat_available and not no_seats_text:
-                # text changed in a way we don't recognise: no "No seats available" phrase,
-                # but also no button found -- log loudly so this gets noticed, but do NOT
-                # alert the owner on every run for something we can't act on anyway.
+            if results_seen:
+                clear_blind_state()
+            else:
+                note_blind_run(f"has_center={has_center} date_ok={date_ok} url={page.url}")
+                exit_code = 1
+
+            if seat_available and not date_ok:
+                # a Select control next to Dushanbe, but the page doesn't show Dec 5 --
+                # auto-reserving could book the wrong date, and staying quiet could
+                # waste a real seat: hand it straight to the owner
+                log("WARNING: seat-like button found but test date not verified as Dec 5 -- NOT auto-reserving")
+                tg_throttled(UNKNOWN_ALERT_PATH,
+                             "🟢❓ Похоже, в Душанбе есть место, но я не смог подтвердить, что это 5 декабря — "
+                             "сам НЕ бронирую. Проверь СЕЙЧАС вручную: https://satreg.collegeboard.org/register/testCenterSearch",
+                             1800)
+                seat_available = False
+            elif results_seen and not seat_available and not no_seats_text:
+                # the Dushanbe row is there but no longer says "No seats available",
+                # yet no Select/Reserve <button>/<a> was recognised -- e.g. the seat
+                # control renders as a radio, a div[role=button], or other wording.
+                # This used to be log-only, i.e. the exact moment a seat most likely
+                # appeared was the one case that never reached the owner.
                 log("WARNING: unrecognised result-row state (neither 'no seats' text nor a button found) -- site text may have changed:", snippet[:300])
+                tg_throttled(UNKNOWN_ALERT_PATH,
+                             "🟢❓ В строке Душанбе (5 декабря) больше НЕТ надписи «No seats available», но кнопку "
+                             "брони я не распознал — ВОЗМОЖНО, МЕСТО ЕСТЬ. Проверь СЕЙЧАС вручную: "
+                             "https://satreg.collegeboard.org/register/testCenterSearch", 1800)
+            elif results_seen and no_seats_text and not seat_available:
+                # back to the plain, recognised "no seats" state: re-arm the alert
+                remove_flag(UNKNOWN_ALERT_PATH)
 
             if seat_available:
+                seat_stage = True
                 log("SEAT AVAILABLE - attempting reserve")
-                tg("🟢🟢🟢 МЕСТО В ДУШАНБЕ НА 5 ДЕКАБРЯ ПОЯВИЛОСЬ! Пытаюсь забронировать прямо сейчас — жди второе сообщение с реальным статусом.")
+                seat_alert_ok = tg("🟢🟢🟢 МЕСТО В ДУШАНБЕ НА 5 ДЕКАБРЯ ПОЯВИЛОСЬ! Пытаюсь забронировать прямо сейчас — жди второе сообщение с реальным статусом.")
 
                 url_before = page.url
                 text_before = page.inner_text("body")
@@ -721,23 +928,40 @@ def main():
                 log("RESERVE ATTEMPT RESULT:", detail)
 
                 if reserved_ok:
-                    tg("✅ Бронь похожа на успешную (страница сдвинулась дальше). ИДИ К КОМПЬЮТЕРУ СЕЙЧАС — "
-                       "20 минут на фото и оплату $68, иначе бронь сгорит: https://satreg.collegeboard.org/register/testCenterSearch")
+                    result_alert_ok = tg("✅ Бронь похожа на успешную (страница сдвинулась дальше). ИДИ К КОМПЬЮТЕРУ СЕЙЧАС — "
+                                         "20 минут на фото и оплату $68, иначе бронь сгорит: https://satreg.collegeboard.org/register/testCenterSearch")
                 else:
-                    tg(f"⚠️ НЕ УВЕРЕН, что бронь прошла — проверить не смог. Заходи СЕЙЧАС САМ и бронируй вручную: "
-                       f"https://satreg.collegeboard.org/register/testCenterSearch (детали: {detail[:200]})")
-            else:
+                    result_alert_ok = tg(f"⚠️ НЕ УВЕРЕН, что бронь прошла — проверить не смог. Заходи СЕЙЧАС САМ и бронируй вручную: "
+                                         f"https://satreg.collegeboard.org/register/testCenterSearch (детали: {detail[:200]})")
+                if not (seat_alert_ok or result_alert_ok):
+                    # Telegram unreachable at the one moment it matters: fail the run
+                    # so GitHub's failed-workflow email is a last-resort channel
+                    log("SEAT ALERT NOT DELIVERED -- failing the run so GitHub emails the owner")
+                    exit_code = 1
+            elif results_seen and no_seats_text:
                 log("no seats this run")
+            else:
+                log("seats NOT confirmed absent this run (see WARNING above)")
         except Exception as e:
-            # this block runs at the single most important moment (a real seat found) --
-            # it must NEVER crash silently. If anything throws here, tell the owner
-            # immediately to go check by hand rather than losing the moment to a traceback.
             log("EXCEPTION during seat-detection/reservation block:", repr(e))
-            tg(f"🔴🔴 ОШИБКА во время попытки бронирования — проверить автоматически не смог. "
-               f"СРОЧНО зайди сам: https://satreg.collegeboard.org/register/testCenterSearch (ошибка: {str(e)[:200]})")
+            exit_code = 1
+            if seat_stage:
+                # this block runs at the single most important moment (a real seat found) --
+                # it must NEVER crash silently. If anything throws here, tell the owner
+                # immediately to go check by hand rather than losing the moment to a traceback.
+                if not tg(f"🔴🔴 ОШИБКА во время попытки бронирования — проверить автоматически не смог. "
+                          f"СРОЧНО зайди сам: https://satreg.collegeboard.org/register/testCenterSearch (ошибка: {str(e)[:200]})"):
+                    log("SEAT ALERT NOT DELIVERED")
+            else:
+                # failed before any seat was seen: we simply didn't get to look
+                note_blind_run(f"exception reading results: {str(e)[:120]}")
 
-        context.storage_state(path=STATE_PATH)
-        browser.close()
+        try:
+            context.storage_state(path=STATE_PATH)
+            browser.close()
+        except Exception as close_err:
+            log("could not save state/close browser:", close_err)
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
