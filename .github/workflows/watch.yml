@@ -1,10 +1,12 @@
 name: SAT seat watch
 
 on:
-  # offset from :00/:05 boundaries on purpose -- those exact minutes are the most
-  # congested across all of GitHub Actions and get queued/delayed more
-  schedule:
-    - cron: "2-59/5 * * * *"
+  # GitHub's own schedule trigger was unreliable (fired ~once in 12+ hours of
+  # observation) and has been replaced by an external timer (cron-job.org)
+  # calling workflow_dispatch every 5 minutes instead. Keeping both would risk
+  # double-firing if GitHub's schedule trigger ever becomes reliable --
+  # doubling the real-world request rate against College Board's site, which
+  # directly works against the anti-ban hardening already in check.py.
   workflow_dispatch: {}
 
 concurrency:
