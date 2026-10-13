@@ -969,11 +969,6 @@ def main():
             except Exception as ce:
                 log("DEBUG continue-ish ids lookup failed:", ce)
 
-            if not os.path.exists(FLAG_PATH):
-                tg("🟡 SAT-мониторинг в облаке (GitHub Actions) запущен и работает. Проверка каждые ~5 минут, независимо от твоего Mac.")
-                with open(FLAG_PATH, "w") as f:
-                    f.write("started")
-
             # the PRIMARY signal is a real, enabled Select/Reserve control in the
             # center's own card (the probe already excludes disabled/aria-disabled
             # ones), not the absence of a specific phrase -- that phrase could change
@@ -981,9 +976,7 @@ def main():
             seat_available = verdict == "button"
             results_seen = date_ok and verdict != "absent"
 
-            if results_seen:
-                clear_blind_state()
-            else:
+            if not results_seen:
                 note_blind_run(f"verdict={verdict} has_center={has_center} date_ok={date_ok} url={page.url}")
                 exit_code = 1
 
@@ -1116,6 +1109,17 @@ def main():
                 log("no seats this run")
             else:
                 log("seats NOT confirmed absent this run (see WARNING above)")
+
+            # the non-urgent notices go out only now, after any reserve attempt:
+            # each tg() can take ~50s when Telegram is slow, and sent before the
+            # Select click they held it up that long while a released seat was
+            # up for grabs (first run after a blind episode, or after a cache miss)
+            if results_seen:
+                clear_blind_state()
+            if not os.path.exists(FLAG_PATH):
+                tg("🟡 SAT-мониторинг в облаке (GitHub Actions) запущен и работает. Проверка каждые ~5 минут, независимо от твоего Mac.")
+                with open(FLAG_PATH, "w") as f:
+                    f.write("started")
         except Exception as e:
             log("EXCEPTION during seat-detection/reservation block:", repr(e))
             exit_code = 1

@@ -21,9 +21,12 @@ check.HEARTBEAT_HOUR = 24  # no daily report in these runs (tested in test_state
 SENT = []
 TG_UP = {"up": True}
 TG_SEAT_DELAY = {"s": 0}  # how long the seat alert's send takes (slow Telegram)
+TG_INFO_DELAY = {"s": 0}  # same for the non-urgent notices (blind recovery, first run)
 def fake_tg(text):
     if "ПОЯВИЛОСЬ" in text:
         time.sleep(TG_SEAT_DELAY["s"])
+    if "снова видит" in text or "запущен" in text:
+        time.sleep(TG_INFO_DELAY["s"])
     SENT.append(text)
     return TG_UP["up"]
 check.tg = fake_tg
@@ -124,6 +127,17 @@ expect(len(s) == 2 and any("ПОЯВИЛОСЬ" in x for x in s) and any(x.start
        "Select clicked before the seat vanished; both alerts still delivered")
 expect(c == 0, "exit 0")
 TG_SEAT_DELAY["s"] = 0
+
+# the first run after a blind episode (its alert sent), and after a cache miss
+# (no started.flag): both notices are due, and Telegram is slow
+TG_INFO_DELAY["s"] = 10
+open(check.BLIND_ALERT_PATH, "w").write(str(time.time()))
+os.remove(check.FLAG_PATH)
+c, s = run(results(SELECT_VANISHING), "seat on the first run after a blind episode + cache miss, Telegram slow")
+expect(any(x.startswith("✅ Бронь") for x in s), "Select clicked before the seat vanished (notices did not hold it up)")
+expect(any("снова видит" in x for x in s) and any("запущен" in x for x in s), "both notices still sent")
+expect(not os.path.exists(check.BLIND_ALERT_PATH) and os.path.exists(check.FLAG_PATH), "flags updated")
+TG_INFO_DELAY["s"] = 0
 
 TG_UP["up"] = False
 c, s = run(results(SELECT_SAME_PAGE), "seat, Telegram completely down")
