@@ -270,7 +270,7 @@ def ensure_on_test_center_search(context, page):
         time.sleep(3)
         content, text = dbg(page, "after_step1_get_started")
 
-    if "You're On Your Way!" in content and "test-center-country-city-input" not in content:
+    if "On Your Way" in content and "test-center-country-city-input" not in content:
         page, _ = click_maybe_newtab(context, page, ["button:has-text('Get Started')"])
         time.sleep(3)
         content, text = dbg(page, "after_step2_get_started")
@@ -283,7 +283,7 @@ def ensure_on_test_center_search(context, page):
         # city-input id is already "visible" by that check while the "You're On
         # Your Way!" intro is still the only thing actually on screen. That made
         # the loop exit one step too early, before ever reaching the real form.
-        if "Choose your test location" in text and "You're On Your Way!" not in text:
+        if "Choose your test location" in text and "On Your Way" not in text:
             break
         if "School Information" in content and "Tell us about your school" in content:
             grade_sel = page.query_selector("#qc-id-personalinfo-list-grade")
@@ -438,7 +438,7 @@ def ensure_on_test_center_search(context, page):
             time.sleep(3)
             content, text = dbg(page, "after_personal_info")
             continue
-        if "Own Your Future with the Digital SAT" in content or "You're On Your Way!" in content:
+        if "Own Your Future with the Digital SAT" in content or "On Your Way" in content:
             click_first(page, ["button:has-text('Get Started')"])
             time.sleep(3)
             content, text = dbg(page, "after_get_started")
