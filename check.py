@@ -476,7 +476,12 @@ def ensure_on_test_center_search(context, page):
             content, text = dbg(page, "after_personal_info")
             continue
         if "Own Your Future with the Digital SAT" in content or "On Your Way" in content:
-            click_first(page, ["button:has-text('Get Started')"])
+            # the pre-loop handlers for these same two intro screens use
+            # click_maybe_newtab because "Get Started" can open a new tab --
+            # this in-loop catch-all used plain click_first instead, which
+            # would silently keep operating on the old, now-abandoned tab if
+            # that ever happened here. Match the established pattern.
+            page, _ = click_maybe_newtab(context, page, ["button:has-text('Get Started')"])
             time.sleep(3)
             content, text = dbg(page, "after_get_started")
             continue
