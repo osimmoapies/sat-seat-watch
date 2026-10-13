@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import threading
 import time
 import urllib.request
 import urllib.parse
@@ -268,6 +269,11 @@ FIND_CONTINUE_JS = r"""
     (b.innerText || '').trim() === 'Continue' && !b.getAttribute('aria-describedby') && usable(b)) || null;
 }
 """
+
+# Text of the step after a successful reserve (photo upload, then payment). Only
+# counts if NEW relative to the results page -- see the reserve block.
+CONFIRM_STEPS = ["STEP 3 OF 4", "STEP 4 OF 4"]  # case-sensitive
+CONFIRM_WORDS = ["photo", "payment", "upload"]  # case-insensitive
 
 
 def ensure_on_test_center_search(context, page):
@@ -949,7 +955,14 @@ def main():
             if seat_available:
                 seat_stage = True
                 log("SEAT AVAILABLE - attempting reserve")
-                seat_alert_ok = tg("🟢🟢🟢 МЕСТО В ДУШАНБЕ НА 5 ДЕКАБРЯ ПОЯВИЛОСЬ! Пытаюсь забронировать прямо сейчас — жди второе сообщение с реальным статусом.")
+                # sent alongside the reserve clicks, not before them: tg() retries
+                # for up to ~50s when Telegram is slow, and a released seat can be
+                # gone by then. Non-daemon, so it still completes if this block throws.
+                seat_alert = {}
+                seat_alert_thread = threading.Thread(target=lambda: seat_alert.update(ok=tg(
+                    "🟢🟢🟢 МЕСТО В ДУШАНБЕ НА 5 ДЕКАБРЯ ПОЯВИЛОСЬ! Пытаюсь забронировать прямо сейчас — "
+                    "жди второе сообщение с реальным статусом.")))
+                seat_alert_thread.start()
 
                 url_before = page.url
                 text_before = page.inner_text("body")
@@ -971,19 +984,38 @@ def main():
                 # that a slow re-render would simply miss.
                 cont_el = None
                 for _ in range(10):
-                    cont_el = page.evaluate_handle(FIND_CONTINUE_JS).as_element()
+                    try:
+                        cont_el = page.evaluate_handle(FIND_CONTINUE_JS).as_element()
+                    except Exception as pe:
+                        # e.g. "Execution context was destroyed" while the Select
+                        # click is still navigating: one failed look used to abort
+                        # the whole reserve -- the next poll reads the new page
+                        log("DEBUG reserve Continue lookup failed, retrying:", repr(pe)[:150])
                     if cont_el:
                         break
                     time.sleep(1)
                 if cont_el:
-                    log("DEBUG reserve Continue:", cont_el.get_attribute("id"), (cont_el.inner_text() or "")[:30])
+                    try:
+                        log("DEBUG reserve Continue:", cont_el.get_attribute("id"), (cont_el.inner_text() or "")[:30])
+                    except Exception:
+                        pass
                     page = click_el_maybe_newtab(context, page, cont_el, "reserve Continue")
                     try:
+                        # wait only for step text the results page did NOT already
+                        # show: a pre-existing "photo ID" note made this return at
+                        # once, so a step 3 slowed by a seat-release rush was read
+                        # too early and reported as "not sure it worked"
                         page.wait_for_function(
-                            "() => /STEP [34] OF 4|photo|payment/i.test(document.body.innerText)",
-                            timeout=15000, polling=500)
+                            """([steps, words]) => {
+                                const t = (document.body && document.body.innerText) || '';
+                                const low = t.toLowerCase();
+                                return steps.some(k => t.includes(k)) || words.some(k => low.includes(k));
+                            }""",
+                            arg=[[k for k in CONFIRM_STEPS if k not in text_before],
+                                 [k for k in CONFIRM_WORDS if k not in text_before.lower()]],
+                            timeout=30000, polling=500)
                     except Exception:
-                        log("DEBUG no photo/payment step text within 15s of Continue")
+                        log("DEBUG no new photo/payment step text within 30s of Continue")
                 else:
                     log("WARNING: no enabled Continue appeared within 10s of the Select click")
                 page.bring_to_front()
@@ -1000,8 +1032,8 @@ def main():
                     if case_insensitive:
                         return k.lower() in text_after.lower() and k.lower() not in text_before.lower()
                     return k in text_after and k not in text_before
-                looks_confirmed = any(newly(k) for k in ["STEP 3 OF 4", "STEP 4 OF 4"]) or \
-                    any(newly(k, True) for k in ["photo", "payment", "upload"])
+                looks_confirmed = any(newly(k) for k in CONFIRM_STEPS) or \
+                    any(newly(k, True) for k in CONFIRM_WORDS)
                 looks_like_error_or_login = ("Sign In" in text_after and "Email Address" in text_after) or newly("error", True)
                 reserved_ok = looks_confirmed and not looks_like_error_or_login
                 detail = f"url_before={url_before} url_after={url_after} text_after_preview={text_after[:300]}"
@@ -1013,6 +1045,8 @@ def main():
                 else:
                     result_alert_ok = tg(f"⚠️ НЕ УВЕРЕН, что бронь прошла — проверить не смог. Заходи СЕЙЧАС САМ и бронируй вручную: "
                                          f"https://satreg.collegeboard.org/register/testCenterSearch (детали: {detail[:200]})")
+                seat_alert_thread.join(60)
+                seat_alert_ok = seat_alert.get("ok", False)
                 if not (seat_alert_ok or result_alert_ok):
                     # Telegram unreachable at the one moment it matters: fail the run
                     # so GitHub's failed-workflow email is a last-resort channel

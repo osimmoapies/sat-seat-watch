@@ -8,6 +8,7 @@ only way to run it before then.
 import os
 import sys
 import tempfile
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 work = tempfile.mkdtemp()
@@ -18,7 +19,10 @@ import check  # noqa: E402
 
 SENT = []
 TG_UP = {"up": True}
+TG_SEAT_DELAY = {"s": 0}  # how long the seat alert's send takes (slow Telegram)
 def fake_tg(text):
+    if "ПОЯВИЛОСЬ" in text:
+        time.sleep(TG_SEAT_DELAY["s"])
     SENT.append(text)
     return TG_UP["up"]
 check.tg = fake_tg
@@ -32,7 +36,7 @@ check.ensure_on_test_center_search = fake_flow
 
 STEP3 = "<h1>STEP 3 OF 4</h1><p>Upload Your Photo</p><p>You have 20 minutes to complete payment.</p>"
 
-def results(card_inner, extra_head="", continue_html=None):
+def results(card_inner, extra_head="", continue_html=None, step3_delay=800):
     if continue_html is None:
         continue_html = "<button id='test-location-continue-disabled' disabled>Continue</button>"
     return f"""<html><body>
@@ -49,7 +53,7 @@ function enableContinue(delay) {{
       "<button id='test-location-continue-enabled' onclick='goStep3()'>Continue</button>";
   }}, delay);
 }}
-function goStep3() {{ setTimeout(() => {{ document.body.innerHTML = {STEP3!r}; }}, 800); }}
+function goStep3() {{ setTimeout(() => {{ document.body.innerHTML = {STEP3!r}; }}, {step3_delay}); }}
 </script></body></html>"""
 
 SELECT_SAME_PAGE = "<button onclick='enableContinue(1500)'>Select</button>"
@@ -57,6 +61,10 @@ SELECT_NEW_TAB = ("<button onclick=\"var w = window.open('about:blank'); w.docum
                   "document.documentElement.outerHTML.replace('enableContinue(1500)', 'enableContinue(500)')); "
                   "w.document.close(); setTimeout(() => w.enableContinue(300), 50);\">Select</button>")
 SELECT_DEAD = "<button onclick='void 0'>Select</button>"
+# someone else takes the seat 5s after the results render unless we click first
+SELECT_VANISHING = ("<button id=selbtn onclick='window.__picked = 1; enableContinue(1500)'>Select</button>"
+                    "<script>setTimeout(() => { if (!window.__picked) document.getElementById('selbtn')"
+                    ".outerHTML = '<p>No seats available.</p>'; }, 5000)</script>")
 STALE_TESTDATE = ("<div style='transform:translateX(-5000px)'>Choose a test date "
                   "<button id='testdate-continue-button' onclick=\"document.body.innerHTML='<h1>Choose a test date</h1>'\">Continue</button></div>")
 PHOTO_NOTE = "<p>Remember to bring a valid photo ID. Upload instructions follow after payment.</p>"
@@ -96,6 +104,25 @@ expect(len(s) == 2 and s[1].startswith("⚠️"), "no false ✅ from pre-existin
 
 c, s = run(results(SELECT_SAME_PAGE, extra_head=STALE_TESTDATE), "stale ENABLED testdate-continue-button mounted earlier in DOM")
 expect(len(s) == 2 and s[1].startswith("✅"), "clicked the real Continue, not the stale one")
+
+c, s = run(results(SELECT_SAME_PAGE, extra_head=PHOTO_NOTE, step3_delay=8000),
+           "results page mentions photo/payment, step 3 renders 8s after Continue (site under load)")
+expect(len(s) == 2 and s[1].startswith("✅"), "waited for the NEW step text, not the pre-existing 'photo'")
+
+ORIG_FIND_CONTINUE = check.FIND_CONTINUE_JS
+check.FIND_CONTINUE_JS = ("() => { if (!window.__threwOnce) { window.__threwOnce = true; "
+                          "throw new Error('Execution context was destroyed (simulated)'); } "
+                          "return (" + ORIG_FIND_CONTINUE.strip() + ")(); }")
+c, s = run(results(SELECT_SAME_PAGE), "first Continue lookup throws (page still navigating after Select)")
+expect(len(s) == 2 and s[1].startswith("✅"), "kept polling and completed the reserve, no abort")
+check.FIND_CONTINUE_JS = ORIG_FIND_CONTINUE
+
+TG_SEAT_DELAY["s"] = 20
+c, s = run(results(SELECT_VANISHING), "Telegram takes 20s to send; the seat is taken by someone else 5s after render")
+expect(len(s) == 2 and any("ПОЯВИЛОСЬ" in x for x in s) and any(x.startswith("✅") for x in s),
+       "Select clicked before the seat vanished; both alerts still delivered")
+expect(c == 0, "exit 0")
+TG_SEAT_DELAY["s"] = 0
 
 TG_UP["up"] = False
 c, s = run(results(SELECT_SAME_PAGE), "seat, Telegram completely down")
