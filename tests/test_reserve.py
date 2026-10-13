@@ -16,6 +16,7 @@ os.environ.update(CB_EMAIL="dummy", CB_PASSWORD="dummy-pw", TG_BOT_TOKEN="dummy"
                   STATE_PATH=os.path.join(work, "state.json"), FLAG_PATH=os.path.join(work, "started.flag"))
 sys.path.insert(0, REPO)
 import check  # noqa: E402
+check.HEARTBEAT_HOUR = 24  # no daily report in these runs (tested in test_states)
 
 SENT = []
 TG_UP = {"up": True}

@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -22,6 +23,9 @@ ERROR_ALERT_PATH = FLAG_PATH + ".error_alerted"
 BLIND_COUNT_PATH = FLAG_PATH + ".blind_count"
 BLIND_ALERT_PATH = FLAG_PATH + ".blind_alerted"
 UNKNOWN_ALERT_PATH = FLAG_PATH + ".unknown_alerted"
+HEARTBEAT_PATH = FLAG_PATH + ".heartbeat"
+DUSHANBE_UTC_OFFSET = 5 * 3600
+HEARTBEAT_HOUR = 9  # Dushanbe local time; the daily report goes out on the first run after it
 
 TEST_DATE_BUTTON_ID = "qc-id-selectdatecenter-testdate-button-DEC-05"
 # the results page repeats the selected date ("Saturday, December 5, 2026") --
@@ -781,6 +785,37 @@ def clear_blind_state():
     remove_flag(BLIND_COUNT_PATH)
 
 
+def heartbeat(outcome):
+    # every alert in this file needs a run to send it. If the external timer
+    # stops (cron-job.org down, or its GitHub token expired -- fine-grained
+    # tokens expire, 30 days by default) nothing runs, nothing alerts, and the
+    # silence looks exactly like "no seats". So: one report a day, and a
+    # MISSING report is the alarm. outcome: seen / blind / error / blocked.
+    try:
+        try:
+            with open(HEARTBEAT_PATH) as f:
+                hb = json.load(f)
+        except (OSError, ValueError):
+            hb = {}
+        counts = hb.setdefault("counts", {})
+        counts[outcome] = counts.get(outcome, 0) + 1
+        local = time.gmtime(time.time() + DUSHANBE_UTC_OFFSET)
+        today = time.strftime("%Y-%m-%d", local)
+        if hb.get("sent_on") != today and local.tm_hour >= HEARTBEAT_HOUR:
+            total = sum(counts.values())
+            seen = counts.get("seen", 0)
+            if tg(f"💙 SAT-мониторинг работает. Проверок с прошлого отчёта: {total} (дошли до результатов "
+                  f"по Душанбе: {seen}; не дошли — ошибка/блокировка/не загрузилось: {total - seen}). "
+                  f"Этот отчёт приходит раз в день после {HEARTBEAT_HOUR}:00 по Душанбе — если однажды он НЕ придёт, "
+                  "проверки остановились: зайди в GitHub Actions (osimmoapies/sat-seat-watch) и cron-job.org."):
+                log("daily heartbeat sent:", counts)
+                hb = {"sent_on": today, "counts": {}}
+        with open(HEARTBEAT_PATH, "w") as f:
+            json.dump(hb, f)
+    except Exception as e:
+        log("heartbeat skipped:", e)
+
+
 def main():
     with sync_playwright() as p:
         # --disable-blink-features=AutomationControlled hides the otherwise
@@ -866,11 +901,13 @@ def main():
                 browser.close()
             except Exception as close_err:
                 log("could not save state/close browser after failure:", close_err)
+            heartbeat("blocked" if site_blocked else "error")
             # expected pause (waiting on the owner to fill the school field) must NOT
             # be reported as a workflow failure, or GitHub emails on every 5-min run
             sys.exit(0 if (expected_pause or site_blocked) else 1)
 
         exit_code = 0
+        results_seen = False
         seat_stage = False
         seat_alert_ok = result_alert_ok = False
         try:
@@ -1084,6 +1121,7 @@ def main():
             browser.close()
         except Exception as close_err:
             log("could not save state/close browser:", close_err)
+        heartbeat("seen" if results_seen else "blind")
         sys.exit(exit_code)
 
 

@@ -19,6 +19,7 @@ from test_probe import HEAD, TAIL, card, QSI, KHU, NO  # noqa: E402
 
 SENT = []
 check.tg = lambda text: (SENT.append(text), True)[1]
+check.HEARTBEAT_HOUR = 24  # daily report off until its own section below
 FIXTURE = {"html": ""}
 
 
@@ -133,6 +134,38 @@ expect(c == 0 and not os.path.exists(check.BLOCK_FLAG_PATH) and not os.path.exis
 RAISE["exc"] = "COULD_NOT_ENTER_REGISTRATION_FLOW"
 c, s = run(page_ok, "fatal again after recovery")
 expect(len(s) == 1, "new episode alerts immediately")
+
+print("===== daily heartbeat =====")
+import json  # noqa: E402
+RAISE["exc"] = None
+check.HEARTBEAT_HOUR = 0
+os.path.exists(check.HEARTBEAT_PATH) and os.remove(check.HEARTBEAT_PATH)
+
+
+def new_day():
+    hb = json.load(open(check.HEARTBEAT_PATH))
+    hb["sent_on"] = "2000-01-01"
+    json.dump(hb, open(check.HEARTBEAT_PATH, "w"))
+
+
+c, s = run(page_ok, "first run of the day")
+expect(c == 0 and len(s) == 1 and "работает" in s[0] and "отчёта: 1 (" in s[0], "daily report sent")
+c, s = run(page_ok, "second run, same day")
+expect(s == [], "once a day only")
+c, s = run(page_blind, "blind run, same day")
+expect(c == 1 and s == [], "no report, no blind alert yet")
+new_day()
+c, s = run(page_ok, "first run of the next day")
+expect(len(s) == 1 and "отчёта: 3 (" in s[0] and "Душанбе: 2;" in s[0] and "загрузилось: 1)" in s[0],
+       "counts every run since the last report: 2 seen + 1 blind")
+new_day()
+check.tg = lambda text: (SENT.append(text), False)[1]
+c, s = run(page_ok, "next day, Telegram down")
+expect(c == 0 and len(s) == 1, "report attempted, run unaffected")
+check.tg = lambda text: (SENT.append(text), True)[1]
+c, s = run(page_ok, "Telegram back")
+expect(len(s) == 1 and "отчёта: 2 (" in s[0], "undelivered report retried, counts kept")
+check.HEARTBEAT_HOUR = 24
 
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)
