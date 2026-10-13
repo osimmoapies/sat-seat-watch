@@ -15,7 +15,7 @@ os.environ.update(CB_EMAIL="dummy", CB_PASSWORD="dummy-pw", TG_BOT_TOKEN="dummy"
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import check  # noqa: E402
-from test_probe import HEAD, TAIL, card, QSI, KHU, NO  # noqa: E402
+from test_probe import HEAD, TAIL, card, QSI, KHU, DUS2, NO  # noqa: E402
 
 SENT = []
 check.tg = lambda text: (SENT.append(text), True)[1]
@@ -101,6 +101,18 @@ for head_name, head in [("live-like", HEAD_LIVELIKE), ("hostile", HEAD)]:
     run(page_no_seats, "re-arm")
     c, s = run(page_neighbour, "QSI unrecognised + neighbour card 'No seats available'")
     expect(c == 0 and len(s) == 1 and "ВОЗМОЖНО, МЕСТО ЕСТЬ" in s[0], "possible-seat alert, not 'no seats'")
+    # QSI says "No seats available" but a SECOND Dushanbe center in the results
+    # has an enabled Select: reported to the owner, never auto-reserved
+    page_other = (head.replace("(N)", "(2)") + card(*QSI, NO)
+                  + card(*DUS2, "<button>Select</button>") + TAIL)
+    run(page_no_seats, "re-arm")
+    c, s = run(page_other, "QSI no seats + Dushanbe #2 has a Select")
+    expect(c == 0 and len(s) == 1 and "НЕ бронирую" in s[0] and "Dushanbe Presidential" in s[0],
+           "other-center seat reported, not reserved")
+    c, s = run(page_other, "other-center seat again (throttled 30 min)")
+    expect(c == 0 and s == [], "throttled")
+    c, s = run(page_no_seats, "other-center seat gone")
+    expect(c == 0 and s == [] and not os.path.exists(check.OTHER_SEAT_ALERT_PATH), "re-armed")
 
 print("===== flow failures (FATAL / site blocked) =====")
 RAISE = {"exc": None}

@@ -23,6 +23,7 @@ ERROR_ALERT_PATH = FLAG_PATH + ".error_alerted"
 BLIND_COUNT_PATH = FLAG_PATH + ".blind_count"
 BLIND_ALERT_PATH = FLAG_PATH + ".blind_alerted"
 UNKNOWN_ALERT_PATH = FLAG_PATH + ".unknown_alerted"
+OTHER_SEAT_ALERT_PATH = FLAG_PATH + ".other_seat_alerted"
 HEARTBEAT_PATH = FLAG_PATH + ".heartbeat"
 DUSHANBE_UTC_OFFSET = 5 * 3600
 HEARTBEAT_HOUR = 9  # Dushanbe local time; the daily report goes out on the first run after it
@@ -750,6 +751,20 @@ SEAT_PROBE_JS = r"""
   // a center card that could not be resolved outranks another card's "No
   // seats available" -- it is the one card that may be showing a seat
   if (foreign && verdict === 'no_seats') { verdict = 'unknown'; card = null; markers = null; }
+  // enabled Select/Reserve controls the verdict did not use: a seat at another
+  // center in the results (a second Dushanbe center, or one nearby), or one in
+  // this center's own "No seats available" card. Reported, never auto-reserved.
+  // A control outside any single card (stepper, filters) is not a seat.
+  const cardOf = b => {
+    for (let el = b; el && el !== document.body; el = el.parentElement) {
+      const m = cardMarkers(el), n = m.dates || m.maps;
+      if (n > 1) return null;
+      if (n === 1) return el;
+    }
+    return null;
+  };
+  const otherSeats = Array.from(new Set(buttons.filter(b => b !== btn).map(cardOf).filter(Boolean)))
+    .map(c => (c.innerText || '').slice(0, 150).replace(/\s+/g, ' '));
   const cardText = card ? (card.innerText || '') : '';
   return {
     btn: btn,
@@ -763,6 +778,7 @@ SEAT_PROBE_JS = r"""
       card_preview: cardText.slice(0, 200).replace(/\s+/g, ' '),
       btn_label: btn ? labelOf(btn).slice(0, 80) : null,
       foreign_signal: foreign,
+      other_seats: otherSeats,
     },
   };
 }
@@ -1109,6 +1125,21 @@ def main():
                 log("no seats this run")
             else:
                 log("seats NOT confirmed absent this run (see WARNING above)")
+
+            # the verdict reads only this center's card; an enabled Select anywhere
+            # else in the Dec 5 results (a second Dushanbe center, one nearby, or
+            # next to this card's own "No seats available") used to pass silently
+            # as "no seats". Not auto-reserved -- which center is the owner's call.
+            other_seats = probe_info.get("other_seats") or []
+            if other_seats and date_ok and not seat_available:
+                log("WARNING: enabled Select outside this center's verdict:", other_seats)
+                tg_throttled(OTHER_SEAT_ALERT_PATH,
+                             "🟢❓ В результатах поиска на 5 декабря есть АКТИВНАЯ кнопка Select: "
+                             + " | ".join(f"«{s}»" for s in other_seats[:3])
+                             + " — это не однозначно место в QSI, поэтому сам НЕ бронирую. Посмотри СЕЙЧАС вручную: "
+                             "https://satreg.collegeboard.org/register/testCenterSearch", 1800)
+            elif results_seen and not other_seats:
+                remove_flag(OTHER_SEAT_ALERT_PATH)
 
             # the non-urgent notices go out only now, after any reserve attempt:
             # each tg() can take ~50s when Telegram is slow, and sent before the

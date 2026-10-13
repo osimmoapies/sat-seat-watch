@@ -78,6 +78,19 @@ CASES = {
     "stray QSI heading, QSI has seat": ([STRAY_HEADING, card(*KHU, NO), card(*QSI, "<button>Select</button>")], "button"),
 }
 
+# a Select the verdict did not use must still be reported (never reserved): a
+# seat at another center in the results, or one in QSI's own no-seats card
+SEL = "<button>Select</button>"
+OTHER_CASES = {
+    "QSI none, Dushanbe #2 has seat": ([card(*QSI, NO), card(*DUS2, SEL)], "no_seats", ["Dushanbe Presidential"]),
+    "Dushanbe #2 seat listed first": ([card(*DUS2, SEL), card(*QSI, NO)], "no_seats", ["Dushanbe Presidential"]),
+    "QSI none, Khujand has seat": ([card(*QSI, NO), card(*KHU, SEL)], "no_seats", ["Khujand"]),
+    "3 centers, only the 3rd has seat": ([card(*QSI, NO), card(*KHU, NO), card(*DUS2, SEL)], "no_seats", ["Dushanbe Presidential"]),
+    "QSI card: no-seats text AND Select": ([card(*QSI, NO + SEL)], "no_seats", ["Qsi International"]),
+    "no seats anywhere (stepper Select ignored)": ([card(*QSI, NO), card(*KHU, NO)], "no_seats", []),
+    "QSI seat is the verdict, not 'other'": ([card(*QSI, SEL), card(*KHU, NO)], "button", []),
+}
+
 
 def main():
     with sync_playwright() as p:
@@ -92,6 +105,14 @@ def main():
             bad += not ok
             print(f"{'OK ' if ok else 'BAD'} {name:38s} want={want:9s} got={got:9s} btn={info['btn_label']!r} "
                   f"card={info['card_tag']} len={info['card_len']} starts={info['starts']}")
+        for name, (cards, want, want_other) in OTHER_CASES.items():
+            pg.set_content(HEAD + "".join(cards) + TAIL)
+            info, _btn = check.probe_seat_state(pg)
+            other = info.get("other_seats")
+            ok = (info["verdict"] == want and other is not None and len(other) == len(want_other)
+                  and all(w in o for w, o in zip(want_other, other)))
+            bad += not ok
+            print(f"{'OK ' if ok else 'BAD'} {name:38s} want={want:9s} got={info['verdict']:9s} other_seats={other}")
         # the stuck-wizard dump goes to PUBLIC run logs: shape yes, personal data no
         pg.set_content("""<h2>Confirm Contact Information</h2><p>osim.test@example.com, +992 93 555 0142</p>
             <p>12 Rudaki Ave, Dushanbe 734025. Born 05/14/2009</p>
