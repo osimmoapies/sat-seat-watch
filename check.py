@@ -285,7 +285,6 @@ def ensure_on_test_center_search(context, page):
                 grade_sel.select_option("6")
                 log("DEBUG corrected grade to 11th Grade (value=6)")
                 time.sleep(1)
-            no_results = "No Results" in page.inner_text("body")
             # target the school-info continue button specifically -- the generic
             # "[id*=button-continue]" selector can match a stale, already-enabled
             # button left over from an earlier sub-step (student/contact info),
@@ -293,8 +292,11 @@ def ensure_on_test_center_search(context, page):
             # own button was genuinely still disabled.
             btn = page.query_selector("#qc-id-personalinfo-schoolinfo-button-continue")
             still_disabled = btn.is_disabled() if btn else True
-            log(f"DEBUG school-info check: no_results={no_results} btn_found={btn is not None} still_disabled={still_disabled}")
-            if no_results and still_disabled:
+            log(f"DEBUG school-info check: btn_found={btn is not None} still_disabled={still_disabled}")
+            # "No Results" text only appears AFTER a failed search attempt, not as
+            # a pristine default -- the disabled continue button alone is the
+            # correct signal that no school has been resolved/selected yet.
+            if still_disabled:
                 # the school genuinely isn't in College Board's database (confirmed:
                 # Tajikistan only has 2 schools listed, neither is his). Rather than
                 # fabricating a specific wrong school match, use the site's own
