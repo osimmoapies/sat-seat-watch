@@ -286,7 +286,12 @@ def ensure_on_test_center_search(context, page):
                 log("DEBUG corrected grade to 11th Grade (value=6)")
                 time.sleep(1)
             no_results = "No Results" in page.inner_text("body")
-            btn = page.query_selector("[id*=button-continue]")
+            # target the school-info continue button specifically -- the generic
+            # "[id*=button-continue]" selector can match a stale, already-enabled
+            # button left over from an earlier sub-step (student/contact info),
+            # which made still_disabled read False here even though this step's
+            # own button was genuinely still disabled.
+            btn = page.query_selector("#qc-id-personalinfo-schoolinfo-button-continue")
             still_disabled = btn.is_disabled() if btn else True
             if no_results and still_disabled:
                 # the school genuinely isn't in College Board's database (confirmed:
