@@ -786,7 +786,10 @@ def main():
         # --disable-blink-features=AutomationControlled hides the otherwise
         # very easy navigator.webdriver=true bot signal that Chromium sets by
         # default under Playwright/Puppeteer -- cheap, standard mitigation
-        # against this specific automation fingerprint.
+        # against this specific automation fingerprint. The flag alone gives
+        # exactly what real Chrome reports (false, from Navigator.prototype);
+        # do not also redefine it in an init script -- that made it undefined
+        # AND an own property of navigator, two tells real Chrome never shows.
         #
         # channel="chromium" runs the full Chromium build in new headless mode
         # instead of the default chromium-headless-shell (both are already
@@ -812,7 +815,6 @@ def main():
                 document.dispatchEvent(new Event('visibilitychange'));
                 window.dispatchEvent(new Event('focus'));
             });
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
         """)
         fingerprint_logged = []
 
@@ -876,6 +878,13 @@ def main():
             idx = body_text.find("Find a Test Center")
             snippet = body_text[idx: idx + 600] if idx >= 0 else body_text[:600]
             log("RESULT SNIPPET:", snippet.replace("\n", " ")[:300])
+            try:
+                # the page-side half of the fingerprint (real Chrome: "false", no own props)
+                log("DEBUG fingerprint js:", page.evaluate(
+                    "() => ({webdriver: String(navigator.webdriver),"
+                    " navigator_own_props: Object.getOwnPropertyNames(navigator)})"))
+            except Exception as fe:
+                log("DEBUG fingerprint js lookup failed:", fe)
 
             # check the FULL page text, not the 600-char snippet above (that's only
             # for the log line) -- if the site ever renders extra filter/UI text
