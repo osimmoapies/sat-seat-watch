@@ -277,12 +277,13 @@ def ensure_on_test_center_search(context, page):
 
     prev_content = None
     for _ in range(14):
-        # check VISIBILITY, not mere presence in the raw HTML -- the testCenterSearch
-        # route can already contain this id in its markup while still showing the
-        # "You're On Your Way!" intro, which made the loop exit one step too early
-        # and return before ever reaching the real search form.
-        city_input_el = page.query_selector("#test-center-country-city-input")
-        if city_input_el and city_input_el.is_visible():
+        # Use the rendered TEXT, not raw HTML presence or even element.is_visible()
+        # -- this multi-step wizard keeps later steps mounted (often just
+        # transform-offset, which is_visible() does not catch), so the
+        # city-input id is already "visible" by that check while the "You're On
+        # Your Way!" intro is still the only thing actually on screen. That made
+        # the loop exit one step too early, before ever reaching the real form.
+        if "Choose your test location" in text and "You're On Your Way!" not in text:
             break
         if "School Information" in content and "Tell us about your school" in content:
             grade_sel = page.query_selector("#qc-id-personalinfo-list-grade")
