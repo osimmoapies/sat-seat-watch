@@ -68,7 +68,16 @@ def do_login(page):
     pw_input = page.wait_for_selector("input[type=password]", timeout=20000)
     pw_input.fill(CB_PASSWORD)
     page.click("input[type=submit]", force=True)
-    page.wait_for_load_state("networkidle", timeout=30000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=30000)
+    except Exception:
+        # this site can keep background polling/websocket activity alive
+        # indefinitely, which makes networkidle time out even on a successful
+        # login -- the equivalent wait elsewhere in this file (full re-login
+        # path) already tolerates this the same way; do_login() itself was
+        # missing it, risking an uncaught exception that would report a
+        # perfectly fine login as a FATAL error.
+        log("DEBUG do_login: networkidle wait timed out, proceeding anyway")
     if "Unable to sign in" in page.content():
         raise RuntimeError("LOGIN_FAILED_BAD_PASSWORD")
     log("login ok")
@@ -563,6 +572,12 @@ def main():
             sel_btn = None
             if row_el:
                 sel_btn = row_el.query_selector("button:has-text('Select'), a:has-text('Select'), button:has-text('Reserve')")
+            if sel_btn and sel_btn.is_disabled():
+                # a disabled button present in the row is not an actionable seat --
+                # without this check a greyed-out button would still flip
+                # seat_available to True below and fire a false "место появилось"
+                # alert for something that can't actually be clicked through.
+                sel_btn = None
 
             # the PRIMARY signal is a real clickable button in the row, not the absence of a
             # specific phrase -- that phrase could change wording and silently break this
