@@ -15,7 +15,7 @@ os.environ.update(CB_EMAIL="dummy", CB_PASSWORD="dummy-pw", TG_BOT_TOKEN="dummy"
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import check  # noqa: E402
-from test_probe import HEAD, TAIL, card, QSI, NO  # noqa: E402
+from test_probe import HEAD, TAIL, card, QSI, KHU, NO  # noqa: E402
 
 SENT = []
 check.tg = lambda text: (SENT.append(text), True)[1]
@@ -93,6 +93,13 @@ for head_name, head in [("live-like", HEAD_LIVELIKE), ("hostile", HEAD)]:
     expect(c == 0 and s == [] and not os.path.exists(check.UNKNOWN_ALERT_PATH), "re-armed")
     c, s = run(page_unknown, "unknown again after re-arm")
     expect(len(s) == 1, "alerts immediately again")
+    # QSI's card shows an unrecognised seat control and a SECOND center's card
+    # says "No seats available": that phrase is not QSI's, so not "no seats"
+    page_neighbour = (head.replace("(N)", "(2)") + card(*QSI, "<label><input type=radio> Choose</label>")
+                      + card(*KHU, NO) + TAIL)
+    run(page_no_seats, "re-arm")
+    c, s = run(page_neighbour, "QSI unrecognised + neighbour card 'No seats available'")
+    expect(c == 0 and len(s) == 1 and "ВОЗМОЖНО, МЕСТО ЕСТЬ" in s[0], "possible-seat alert, not 'no seats'")
 
 print("===== flow failures (FATAL / site blocked) =====")
 RAISE = {"exc": None}

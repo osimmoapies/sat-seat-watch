@@ -653,13 +653,27 @@ def ensure_on_test_center_search(context, page):
 # "No seats available" is checked before the button at each level: an ancestor
 # wide enough to hold another center's Select button also holds this center's
 # "No seats available", and must not be read as a seat.
+# The first signal found must also still be inside ONE card: when this center's
+# own card shows neither (e.g. its seat is a radio/"Choose" control), the walk
+# used to climb into the result list and take the NEXT center's "No seats
+# available" as this center's -- a silent false "no seats" -- or another center's
+# Select as a seat to auto-reserve. Every live card holds exactly one date line
+# (and a Google Maps link), so an ancestor with two spans several cards.
+# datePattern is TEST_DATE_RE's pattern, passed in so the two cannot drift.
 SEAT_PROBE_JS = r"""
-() => {
+(datePattern) => {
   const QSI_RE = /Qsi International/i, CITY_RE = /Dushanbe/i;
   const NO_SEATS_RE = /No seats available/i;
   const BTN_RE = /^\s*(select|reserve)\b/i;
+  const DATE_RE = new RegExp(datePattern, 'gi');
+  const MAPS_RE = /google maps|google\.[a-z.]+\/maps|maps\.google\.|maps\.app\.goo\.gl|goo\.gl\/maps/i;
   const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'OPTION', 'SELECT', 'HEAD', 'TITLE']);
   const rendered = el => el.getClientRects().length > 0;
+  const cardMarkers = el => ({
+    maps: Array.from(el.querySelectorAll('a')).filter(a => rendered(a)
+            && MAPS_RE.test((a.getAttribute('href') || '') + ' ' + (a.innerText || ''))).length,
+    dates: ((el.innerText || '').match(DATE_RE) || []).length,
+  });
   const labelOf = el => (((el.innerText || el.value || '') + '').trim()
                          || (el.getAttribute('aria-label') || '').trim());
   const buttons = Array.from(document.querySelectorAll(
@@ -676,19 +690,42 @@ SEAT_PROBE_JS = r"""
   let starts = deepestMatching(QSI_RE);
   if (starts.length === 0) starts = deepestMatching(CITY_RE);
   let verdict = starts.length ? 'unknown' : 'absent', btn = null, card = null;
+  let markers = null, foreign = null;
   for (const start of starts) {
+    let passedOwnCard = false;
     for (let el = start; el && el !== document.body; el = el.parentElement) {
       const t = el.innerText || '';
       if (t.length > 3000) break;
-      if (NO_SEATS_RE.test(t)) {
-        if (verdict !== 'button') { verdict = 'no_seats'; card = card || el; }
+      const m = cardMarkers(el);
+      // the date line is the card marker (the live card's full text is in the
+      // run log: exactly one); Maps links only stand in if cards drop the date
+      const cards = m.dates || m.maps;
+      const noSeats = NO_SEATS_RE.test(t);
+      const b = noSeats ? null : buttons.find(x => el.contains(x));
+      if (!noSeats && !b) {
+        passedOwnCard = passedOwnCard || cards === 1;
+        continue;
+      }
+      if (cards > 1) {
+        // the first signal is in an ancestor spanning several cards. Climbed
+        // there from inside a card: that card shows neither, so it is
+        // unresolved. From outside any card (a heading above the list): a
+        // stray mention, which decides nothing.
+        if (passedOwnCard) foreign = foreign || {markers: m, preview: t.slice(0, 120).replace(/\s+/g, ' ')};
         break;
       }
-      const b = buttons.find(x => el.contains(x));
-      if (b) { verdict = 'button'; btn = b; card = el; break; }
+      if (noSeats) {
+        if (!card) { card = el; markers = m; }
+        if (verdict === 'unknown') verdict = 'no_seats';
+        break;
+      }
+      verdict = 'button'; btn = b; card = el; markers = m; break;
     }
     if (verdict === 'button') break;
   }
+  // a center card that could not be resolved outranks another card's "No
+  // seats available" -- it is the one card that may be showing a seat
+  if (foreign && verdict === 'no_seats') { verdict = 'unknown'; card = null; markers = null; }
   const cardText = card ? (card.innerText || '') : '';
   return {
     btn: btn,
@@ -698,8 +735,10 @@ SEAT_PROBE_JS = r"""
       page_select_buttons: buttons.length,
       card_tag: card ? card.tagName + (card.id ? '#' + card.id : '') : null,
       card_len: cardText.length,
+      card_markers: markers,
       card_preview: cardText.slice(0, 200).replace(/\s+/g, ' '),
       btn_label: btn ? labelOf(btn).slice(0, 80) : null,
+      foreign_signal: foreign,
     },
   };
 }
@@ -707,7 +746,7 @@ SEAT_PROBE_JS = r"""
 
 
 def probe_seat_state(page):
-    handle = page.evaluate_handle(SEAT_PROBE_JS)
+    handle = page.evaluate_handle(SEAT_PROBE_JS, TEST_DATE_RE.pattern)
     info = handle.get_property("info").json_value()
     btn = handle.get_property("btn").as_element()
     return info, btn

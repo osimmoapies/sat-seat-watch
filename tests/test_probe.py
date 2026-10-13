@@ -36,9 +36,21 @@ def card(name, addr, inner):
 <a href="#">click here to open the address in Google Maps</a><p>{addr}</p>{inner}</div>"""
 
 
+def card_nodate(name, addr, inner):
+    return card(name, addr, inner).replace("<p>Saturday, December 5, 2026</p>", "")
+
+
+def card_2maps(name, addr, inner):
+    return card(name, addr, inner).replace(
+        "<p>" + addr + "</p>", f'<a href="https://maps.google.com/?q=x">{addr}</a>')
+
+
 QSI = ("Qsi International School Of Dushanbe", "3 Turakul Zehni Street, Dushanbe, Tajikistan, 20521")
 KHU = ("Khujand Lyceum", "1 Lenin St, Khujand, Tajikistan")
+DUS2 = ("Dushanbe Presidential School", "5 Rudaki Ave, Dushanbe, Tajikistan")
 NO = "<p>No seats available.</p>"
+RADIO = "<label><input type=radio name=c> Choose</label>"
+STRAY_HEADING = "<h2>Test centers near Qsi International School Of Dushanbe</h2>"
 
 CASES = {
     "live-like no seats": ([card(*QSI, NO)], "no_seats"),
@@ -52,6 +64,18 @@ CASES = {
     "QSI has seat, other center none": ([card(*KHU, NO), card(*QSI, "<button>Select</button>")], "button"),
     "QSI absent, other center seat": ([card(*KHU, "<button>Select</button>")], "?"),
     "no results at all": ([], "?"),
+    # QSI's own card shows neither signal: the walk must not borrow a NEIGHBOUR's
+    "QSI radio, next card no seats": ([card(*QSI, RADIO), card(*KHU, NO)], "unknown"),
+    "prev card no seats, QSI radio": ([card(*KHU, NO), card(*QSI, RADIO)], "unknown"),
+    "QSI text-only seat, Dushanbe #2 none": ([card(*QSI, "<p>Seats available</p>"), card(*DUS2, NO)], "unknown"),
+    "QSI no status, other center Select": ([card(*QSI, ""), card(*KHU, "<button>Select</button>")], "unknown"),
+    "two QSI rows: radio + no seats": ([card(*QSI, RADIO), card(*QSI, NO)], "unknown"),
+    "no date lines: Maps-link fallback": ([card_nodate(*QSI, RADIO), card_nodate(*KHU, NO)], "unknown"),
+    "no date lines, plain no seats": ([card_nodate(*QSI, NO), card_nodate(*KHU, NO)], "no_seats"),
+    "card with 2 Maps links, no seats": ([card_2maps(*QSI, NO)], "no_seats"),
+    "card with 2 Maps links, seat": ([card_2maps(*QSI, "<button>Select</button>")], "button"),
+    "stray QSI heading above 2 cards": ([STRAY_HEADING, card(*KHU, NO), card(*QSI, NO)], "no_seats"),
+    "stray QSI heading, QSI has seat": ([STRAY_HEADING, card(*KHU, NO), card(*QSI, "<button>Select</button>")], "button"),
 }
 
 
