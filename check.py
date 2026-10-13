@@ -60,8 +60,11 @@ def do_login(page):
         return
     page.fill("#input28", CB_EMAIL)
     page.click("input[type=submit]", force=True)
-    page.wait_for_selector("text=Select from the following options", timeout=20000)
-    page.click("a[aria-label='Select Password.']", force=True)
+    try:
+        page.wait_for_selector("text=Select from the following options", timeout=10000)
+        page.click("a[aria-label='Select Password.']", force=True)
+    except Exception:
+        log("DEBUG do_login: no method-picker shown, assuming password field appears directly")
     pw_input = page.wait_for_selector("input[type=password]", timeout=20000)
     pw_input.fill(CB_PASSWORD)
     page.click("input[type=submit]", force=True)
@@ -146,6 +149,14 @@ def ensure_on_test_center_search(context, page):
     time.sleep(3)
     dismiss_cookie_banner(page)
     content, text = dbg(page, "mysat_initial")
+    if len(text.strip()) < 20:
+        # blank/unrendered page, not necessarily "not logged in" -- give it one
+        # more chance before concluding a fresh login is needed. Misreading this
+        # as logged-out previously triggered an unnecessary do_login() call on an
+        # already-valid session, which then hit an unhandled edge case.
+        log("DEBUG mysat_initial came back blank, retrying before assuming logged out")
+        time.sleep(4)
+        content, text = dbg(page, "mysat_initial_retry")
 
     if not looks_authenticated(content) and "Hello" not in text:
         do_login(page)
