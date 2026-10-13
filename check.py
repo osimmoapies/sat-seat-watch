@@ -152,6 +152,19 @@ def ensure_on_test_center_search(context, page):
         page.goto("https://mysat.collegeboard.org/", wait_until="domcontentloaded", timeout=45000)
         time.sleep(3)
         content, text = dbg(page, "mysat_after_login")
+        # mysat.collegeboard.org sometimes shows its own simple "Sign In / Continue"
+        # splash on top of an already-valid session rather than the dashboard --
+        # a second click is needed to actually land on "Hello osim..."
+        if "Sign In" in text and "Continue" in text and "Hello" not in text:
+            log("DEBUG mysat splash screen shown after login, clicking its Continue")
+            page.evaluate("""
+                () => {
+                    var b = Array.from(document.querySelectorAll('button')).find(x => x.innerText.trim() === 'Continue');
+                    if (b) b.click();
+                }
+            """)
+            time.sleep(4)
+            content, text = dbg(page, "after_mysat_splash_continue")
 
     content, text = "", ""
     for entry_attempt in range(3):
@@ -276,20 +289,94 @@ def ensure_on_test_center_search(context, page):
             btn = page.query_selector("[id*=button-continue]")
             still_disabled = btn.is_disabled() if btn else True
             if no_results and still_disabled:
-                log("BLOCKED: school name is empty and required -- cannot safely guess a formal school name")
-                asked_flag = FLAG_PATH + ".school_asked"
-                if not os.path.exists(asked_flag):
-                    tg("🟡 Нужна твоя помощь (разово): на шаге School Information поле 'Name of your high school' пустое и обязательное. "
-                       "Зайди сам один раз на https://satreg.collegeboard.org/register/personalInformation , впиши название школы, "
-                       "выбери её из списка и нажми Continue. После этого мониторинг дальше пойдёт automatически, больше писать не буду.")
-                    with open(asked_flag, "w") as f:
-                        f.write("asked")
-                raise RuntimeError("NEEDS_SCHOOL_NAME_INPUT")
+                # the school genuinely isn't in College Board's database (confirmed:
+                # Tajikistan only has 2 schools listed, neither is his). Rather than
+                # fabricating a specific wrong school match, use the site's own
+                # legitimate "my high school is not listed" path -- any real student
+                # in this situation would select the same option.
+                log("DEBUG school not in database -- using the site's own 'not listed' path")
+                edit_btn = page.query_selector("#highschool-edit-button")
+                if edit_btn:
+                    edit_btn.click(force=True)
+                    time.sleep(2)
+                intl = page.query_selector("#qc-id-selectdatecenter-testlocation-radio-international")
+                if intl:
+                    intl.click(force=True)
+                    time.sleep(2)
+                country_sel = page.query_selector("#ai-search-country-dropdown")
+                if country_sel:
+                    page.select_option("#ai-search-country-dropdown", "TJ")
+                    time.sleep(1)
+                name_in = page.query_selector("#ai-search-name-input")
+                city_in = page.query_selector("#ai-search-city-input")
+                if name_in:
+                    name_in.fill("Lyceum for Gifted Students")
+                if city_in:
+                    city_in.fill("Dushanbe")
+                time.sleep(0.5)
+                search_btn = page.query_selector("#ai-search-high-school-button")
+                if search_btn:
+                    search_btn.click(force=True)
+                    time.sleep(4)
+                toggle = page.query_selector("#ai-cant-find-school-toggle")
+                if toggle:
+                    toggle.click(force=True)
+                    time.sleep(2)
+                not_listed = page.query_selector("#ai-cant-find-school-radio-not-listed")
+                if not_listed:
+                    not_listed.check(force=True)
+                    time.sleep(1)
+                cant_find_submit = page.query_selector("#ai-cant-find-school-submit")
+                if cant_find_submit:
+                    cant_find_submit.click(force=True)
+                    time.sleep(3)
+                page.evaluate("""
+                    () => {
+                        var b = Array.from(document.querySelectorAll('button')).find(x => x.innerText.trim() === 'Yes, this is correct');
+                        if (b) b.click();
+                    }
+                """)
+                time.sleep(5)
+                content, text = dbg(page, "after_school_not_listed")
+                continue
             if btn and not btn.is_disabled():
                 btn.click(force=True)
                 time.sleep(3)
                 content, text = dbg(page, "after_school_info_fixed")
                 continue
+
+        if "Start by telling us a bit about yourself" in content or page.query_selector("#checkBox-sdqEthnicityChoices-5"):
+            # optional demographic survey (race/ethnicity, parent education, military,
+            # languages). We decline every question rather than guessing personal
+            # identity details on his behalf -- every question here has an explicit
+            # "I do not wish to respond" option, which is the honest, safe default.
+            log("DEBUG on Student Profile demographic page -- declining all optional questions")
+            for cb_id in ["checkBox-sdqEthnicityChoices-5", "checkBox-sdqRaceChoices-5", "checkBox-sdqMilitaryChoices-3"]:
+                el = page.query_selector(f"#{cb_id}")
+                if el:
+                    el.check(force=True)
+            for sel_id in ["parent1Education", "parent2Education"]:
+                el = page.query_selector(f"#{sel_id}")
+                if el:
+                    page.select_option(f"#{sel_id}", "I do not wish to respond")
+            for radio_id in ["firstLanguage03", "bestLanguage03"]:
+                el = page.query_selector(f"#{radio_id}")
+                if el:
+                    el.check(force=True)
+            time.sleep(1)
+            clicked_continue = page.evaluate("""
+                () => {
+                    var btns = Array.from(document.querySelectorAll('button')).filter(
+                        b => b.innerText.trim() === 'Continue' && !b.getAttribute('aria-describedby')
+                    );
+                    if (btns.length > 0) { btns[0].click(); return true; }
+                    return false;
+                }
+            """)
+            log("DEBUG student profile continue clicked:", clicked_continue)
+            time.sleep(4)
+            content, text = dbg(page, "after_student_profile")
+            continue
 
         if content == prev_content:
             try:
