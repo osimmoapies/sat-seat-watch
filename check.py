@@ -33,8 +33,13 @@ REALISTIC_USER_AGENT = (
     # a Windows/Mac UA string paired with navigator.platform/WebGL still
     # reporting Linux is a cross-signal mismatch that bot-detection heuristics
     # specifically look for, which would be worse than just using the default.
+    # The version must match the real engine too (filled in from
+    # browser.version at launch): a pinned "Chrome/130" next to the
+    # sec-ch-ua client hint the browser itself sends (v=153 when this was
+    # written, and rising with every unpinned `pip install playwright`) is the
+    # same kind of mismatch.
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
 )
 
 # Markers for common bot-protection vendors (Akamai, Cloudflare, PerimeterX/HUMAN,
@@ -736,9 +741,18 @@ def main():
         # very easy navigator.webdriver=true bot signal that Chromium sets by
         # default under Playwright/Puppeteer -- cheap, standard mitigation
         # against this specific automation fingerprint.
-        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        #
+        # channel="chromium" runs the full Chromium build in new headless mode
+        # instead of the default chromium-headless-shell (both are already
+        # installed by `playwright install chromium`). The headless shell
+        # brands itself "HeadlessChrome" in the sec-ch-ua header it sends with
+        # EVERY request -- a user_agent override does not touch client hints,
+        # so each request said both "Chrome/130" (UA) and "HeadlessChrome;v=153"
+        # (sec-ch-ua). Full Chromium sends a plain "Chromium" brand.
+        browser = p.chromium.launch(channel="chromium", headless=True,
+                                    args=["--disable-blink-features=AutomationControlled"])
         ctx_kwargs = {
-            "user_agent": REALISTIC_USER_AGENT,
+            "user_agent": REALISTIC_USER_AGENT.format(major=browser.version.split(".")[0]),
             "viewport": {"width": 1366, "height": 768},
             "locale": "en-US",
         }
@@ -754,6 +768,16 @@ def main():
             });
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
         """)
+        fingerprint_logged = []
+
+        def log_fingerprint_once(req):
+            # what the site actually receives -- so a UA/client-hint mismatch
+            # shows up in the run log instead of having to be guessed at
+            if not fingerprint_logged and "collegeboard.org" in req.url:
+                fingerprint_logged.append(True)
+                log("DEBUG fingerprint headers:", {k: v for k, v in req.headers.items()
+                                                    if k == "user-agent" or k.startswith("sec-ch-ua")})
+        context.on("request", log_fingerprint_once)
         page = context.new_page()
 
         try:
