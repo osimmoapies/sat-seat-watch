@@ -1,5 +1,5 @@
 .venv/
 state.json
-started.flag
+started.flag*
 __pycache__/
 *.pyc
