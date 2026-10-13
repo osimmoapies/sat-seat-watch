@@ -18,12 +18,20 @@ TEST_DATE_BUTTON_ID = "qc-id-selectdatecenter-testdate-button-DEC-05"
 
 
 def tg(text):
+    # the single most important message this whole system sends (seat found)
+    # goes through here -- a bare one-shot call with no retry means one
+    # transient network/API blip at exactly the wrong moment loses the alert
+    # with nobody ever finding out, which is precisely what must never happen.
     data = urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": text}).encode()
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    try:
-        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=15)
-    except Exception as e:
-        print("TG SEND FAILED:", e)
+    for attempt in range(3):
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=15)
+            return
+        except Exception as e:
+            print(f"TG SEND FAILED (attempt {attempt + 1}/3):", e)
+            if attempt < 2:
+                time.sleep(3)
 
 
 def log(*a):
