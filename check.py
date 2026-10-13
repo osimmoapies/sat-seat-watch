@@ -523,12 +523,14 @@ def main():
                 with open(FLAG_PATH, "w") as f:
                     f.write("started")
 
-            # scope the click to the actual result row (Qsi International...), not the
-            # whole page -- avoids matching an unrelated "Select"/"Reserve" text elsewhere
+            # scope the click to the actual result row, not the whole page -- avoids
+            # matching an unrelated "Select"/"Reserve" text elsewhere. Match on
+            # Dushanbe too (not just the exact school name), consistent with the
+            # has_center check above, in case the row text ever varies slightly.
             row_handle = page.evaluate_handle("""
                 () => {
                     var all = Array.from(document.querySelectorAll('*'));
-                    return all.find(e => /Qsi International/i.test(e.innerText||'') && e.innerText.length < 2000) || null;
+                    return all.find(e => /Qsi International|Dushanbe/i.test(e.innerText||'') && e.innerText.length < 2000) || null;
                 }
             """)
             row_el = row_handle.as_element()
