@@ -280,6 +280,28 @@ CONFIRM_STEPS = ["STEP 3 OF 4", "STEP 4 OF 4"]  # case-sensitive
 CONFIRM_WORDS = ["photo", "payment", "upload"]  # case-insensitive
 
 
+# What the wizard looked like when it got stuck. The repo -- and so every run
+# log -- is PUBLIC: keep the form's shape, not the student's data. Values only
+# for the selects this script sets itself; never input values (getting stuck on
+# the student/contact-info steps would publish DOB, address, phone; password
+# fields would print CB_PASSWORD); digits and emails in the page text masked.
+STUCK_DUMP_JS = r"""
+() => {
+  const OWN = ['qc-id-personalinfo-list-grade', 'ai-search-country-dropdown',
+               'test-center-country-select', 'parent1Education', 'parent2Education'];
+  const selects = Array.from(document.querySelectorAll('select')).map(s => OWN.includes(s.id)
+    ? {id: s.id, value: s.value, options: Array.from(s.options).map(o => ({v: o.value, t: o.text}))}
+    : {id: s.id, options: s.options.length});
+  const inputs = Array.from(document.querySelectorAll('input'))
+    .filter(i => i.type !== 'hidden' && i.type !== 'checkbox' && i.type !== 'password')
+    .map(i => ({id: i.id, type: i.type, value_len: i.value.length}));
+  const text = document.body.innerText.slice(0, 1500)
+    .replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '<email>').replace(/\d/g, '#');
+  return {selects: selects, inputs: inputs, bodyTextFull: text};
+}
+"""
+
+
 def ensure_on_test_center_search(context, page):
     page.goto("https://mysat.collegeboard.org/", wait_until="domcontentloaded", timeout=45000)
     time.sleep(3)
@@ -554,15 +576,7 @@ def ensure_on_test_center_search(context, page):
 
         if content == prev_content:
             try:
-                debug_info = page.evaluate("""
-                    () => {
-                        var allSelects = Array.from(document.querySelectorAll('select')).map(s => ({id:s.id, value:s.value, options: Array.from(s.options).map(o=>({v:o.value,t:o.text}))}));
-                        // never dump password fields: getting stuck right after the
-                        // step-up/full re-login fill would print CB_PASSWORD's value
-                        var allInputs = Array.from(document.querySelectorAll('input')).filter(i=>i.type!=='hidden'&&i.type!=='checkbox'&&i.type!=='password').map(i => ({id:i.id, value:i.value, type:i.type}));
-                        return {selects: allSelects, inputs: allInputs, bodyTextFull: document.body.innerText.slice(0, 1500)};
-                    }
-                """)
+                debug_info = page.evaluate(STUCK_DUMP_JS)
             except Exception as e:
                 debug_info = {"eval_error": str(e)}
             log("DEBUG stuck - content did not change. debug:", debug_info)

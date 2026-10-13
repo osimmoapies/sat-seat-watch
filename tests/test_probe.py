@@ -92,6 +92,19 @@ def main():
             bad += not ok
             print(f"{'OK ' if ok else 'BAD'} {name:38s} want={want:9s} got={got:9s} btn={info['btn_label']!r} "
                   f"card={info['card_tag']} len={info['card_len']} starts={info['starts']}")
+        # the stuck-wizard dump goes to PUBLIC run logs: shape yes, personal data no
+        pg.set_content("""<h2>Confirm Contact Information</h2><p>osim.test@example.com, +992 93 555 0142</p>
+            <p>12 Rudaki Ave, Dushanbe 734025. Born 05/14/2009</p>
+            <input id=phone value='+992935550142'><input id=pw type=password value='hunter2'>
+            <select id=dob-year><option>2009</option></select>
+            <select id=qc-id-personalinfo-list-grade><option value=6 selected>11th Grade</option></select>""")
+        dump = str(pg.evaluate(check.STUCK_DUMP_JS))
+        leaked = [v for v in ["osim.test@example.com", "555", "0142", "734025", "2009", "hunter2", "Rudaki"]
+                  if v in dump]
+        ok = (leaked == ["Rudaki"] and "'value': '6'" in dump and "value_len" in dump
+              and "'pw'" not in dump)  # not even the password's length
+        bad += not ok
+        print(f"{'OK ' if ok else 'BAD'} stuck dump: personal values masked (street name stays) leaked={leaked}")
         b.close()
     print("FAILURES:", bad)
     return bad
