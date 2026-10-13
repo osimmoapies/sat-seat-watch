@@ -428,14 +428,23 @@ def ensure_on_test_center_search(context, page):
         prev_content = content
         if "STEP 1 OF 4" in content and "test-center-country-city-input" not in content and "Own Your Future with the Digital SAT" not in content:
             ids = page.evaluate("""
-                () => Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]')).map(e => e.id)
+                () => Array.from(document.querySelectorAll('[id*=continue], [id*=Continue]')).map(e => ({id: e.id, disabled: !!e.disabled}))
             """)
             log("DEBUG personalInformation continue-ish ids:", ids)
             clicked_id = None
-            for cid in ids:
-                if "session" not in cid.lower() and "timeout" not in cid.lower():
-                    clicked_id = cid
-                    break
+            for item in ids:
+                cid = item["id"]
+                low = cid.lower()
+                # exclude disabled buttons (the real current-substep button may be
+                # disabled pending required fields) and stale ids from steps this
+                # wizard keeps mounted after they're done -- schoolinfo has its own
+                # dedicated handler earlier in the loop, so by the time we're here
+                # it's always a leftover, same bug class already fixed for the
+                # school-info and reserve-confirmation buttons.
+                if item["disabled"] or "session" in low or "timeout" in low or "schoolinfo" in low:
+                    continue
+                clicked_id = cid
+                break
             if clicked_id:
                 page.click(f"#{clicked_id}", force=True)
             else:
@@ -459,7 +468,7 @@ def ensure_on_test_center_search(context, page):
             time.sleep(2)
             content, text = dbg(page, "after_terms")
             continue
-        if f"qc-id-selectdatecenter-testdate-button-DEC-05" in content:
+        if TEST_DATE_BUTTON_ID in content:
             date_btn = page.query_selector(f"#{TEST_DATE_BUTTON_ID}")
             if date_btn:
                 date_btn.click(force=True)
@@ -526,8 +535,14 @@ def main():
             snippet = body_text[idx: idx + 600] if idx >= 0 else body_text[:600]
             log("RESULT SNIPPET:", snippet.replace("\n", " ")[:300])
 
-            has_center = ("Dushanbe" in snippet) or ("Qsi International" in snippet)
-            no_seats_text = "No seats available" in snippet
+            # check the FULL page text, not the 600-char snippet above (that's only
+            # for the log line) -- if the site ever renders extra filter/UI text
+            # before the result row, "Dushanbe"/"Qsi International" or "No seats
+            # available" could fall outside that narrow window, which would make
+            # has_center silently read False and cause a real seat to be missed
+            # entirely (seat_available requires has_center AND a real button).
+            has_center = ("Dushanbe" in body_text) or ("Qsi International" in body_text)
+            no_seats_text = "No seats available" in body_text
 
             if not os.path.exists(FLAG_PATH):
                 tg("🟡 SAT-мониторинг в облаке (GitHub Actions) запущен и работает. Проверка каждые ~5 минут, независимо от твоего Mac.")
