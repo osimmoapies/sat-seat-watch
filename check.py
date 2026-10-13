@@ -610,8 +610,22 @@ def main():
                 url_before = page.url
                 text_before = page.inner_text("body")
 
-                # sel_btn is guaranteed non-None here: seat_available already required it
-                sel_btn.click(force=True)
+                # sel_btn is guaranteed non-None here: seat_available already required it.
+                # This site has repeatedly opened new tabs for key navigation clicks
+                # ("Register for the SAT", "Get Started") -- the exact same pattern
+                # is very plausible here too, and this reserve click has never been
+                # exercised against a real seat to rule it out. If it DID open a new
+                # tab and this kept operating on the old, abandoned page, every check
+                # below (cont_id, text_after) would silently read the wrong page at
+                # the single highest-stakes moment in the whole script.
+                try:
+                    with context.expect_page(timeout=4000) as new_page_info:
+                        sel_btn.click(force=True)
+                    page = new_page_info.value
+                    page.wait_for_load_state("domcontentloaded", timeout=20000)
+                    log("DEBUG reserve Select click opened a new tab:", page.url)
+                except Exception:
+                    pass
                 time.sleep(3)
                 # this site requires a page-level Continue after Select on every other
                 # step (date, school info, terms) -- almost certainly true here too.
