@@ -293,6 +293,7 @@ def ensure_on_test_center_search(context, page):
             # own button was genuinely still disabled.
             btn = page.query_selector("#qc-id-personalinfo-schoolinfo-button-continue")
             still_disabled = btn.is_disabled() if btn else True
+            log(f"DEBUG school-info check: no_results={no_results} btn_found={btn is not None} still_disabled={still_disabled}")
             if no_results and still_disabled:
                 # the school genuinely isn't in College Board's database (confirmed:
                 # Tajikistan only has 2 schools listed, neither is his). Rather than
@@ -344,10 +345,19 @@ def ensure_on_test_center_search(context, page):
                 time.sleep(5)
                 content, text = dbg(page, "after_school_not_listed")
                 continue
-            if btn and not btn.is_disabled():
+            elif btn and not btn.is_disabled():
                 btn.click(force=True)
                 time.sleep(3)
                 content, text = dbg(page, "after_school_info_fixed")
+                continue
+            else:
+                # neither branch matched (e.g. the page hadn't finished rendering
+                # the "No Results" placeholder or the continue button yet) --
+                # re-check instead of falling through to the generic STEP 1
+                # handler below, which could click the wrong (disabled) button
+                log("DEBUG school-info state not yet resolved, waiting and retrying")
+                time.sleep(2)
+                content, text = dbg(page, "after_school_info_retry")
                 continue
 
         if "Start by telling us a bit about yourself" in content or page.query_selector("#checkBox-sdqEthnicityChoices-5"):
