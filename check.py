@@ -247,7 +247,8 @@ def click_el_maybe_newtab(context, page, el, label):
         return new_page
     except Exception as e:
         # the usual case is simply "no new tab within 4s"; log anything else
-        if "Timeout" not in type(e).__name__:
+        # (including the click itself timing out) -- this is the reserve path
+        if 'waiting for event "page"' not in str(e):
             log(f"DEBUG {label} click raised:", repr(e)[:200])
         return page
 
@@ -796,19 +797,18 @@ def main():
             expected_pause = str(e) == "NEEDS_SCHOOL_NAME_INPUT"
             site_blocked = str(e) == "SITE_BLOCKED_SUSPECTED"
             if site_blocked:
-                # a bot-protection challenge page was detected -- alert ONCE
-                # (not on every 5-min run while the block persists, which would
-                # just spam without being actionable) and back off quietly.
+                # a bot-protection challenge page was detected -- not on every
+                # 5-min run while the block persists (spam, not actionable), but
+                # not just ONCE either: a block lasting days used to mean one
+                # message and then silence while seats went unchecked. Reminder
+                # every 6h; tg_throttled also only marks it sent if it went out.
                 # This run still exits 0 so GitHub doesn't flag it as a workflow
                 # failure; the next scheduled run tries again on its own.
-                if not os.path.exists(BLOCK_FLAG_PATH):
-                    # only mark it alerted if the alert actually went out --
-                    # otherwise one failed send silenced this whole episode
-                    if tg("🔴 Сайт College Board похоже временно блокирует/проверяет автоматические запросы. "
-                          "Мониторинг продолжит пробовать сам, но если это не проходит долго — возможно, нужно подождать "
-                          "или проверить вручную."):
-                        with open(BLOCK_FLAG_PATH, "w") as f:
-                            f.write("alerted")
+                tg_throttled(BLOCK_FLAG_PATH,
+                             "🔴 Сайт College Board похоже временно блокирует/проверяет автоматические запросы. "
+                             "Мониторинг продолжит пробовать сам, но пока это так — места НЕ проверяются; "
+                             "если это не проходит долго — возможно, нужно подождать или проверить вручную.",
+                             6 * 3600)
             elif not expected_pause:
                 # was sent on EVERY failing run (every 5 min while e.g. login is
                 # broken) -- enough noise to get the bot muted, which would also

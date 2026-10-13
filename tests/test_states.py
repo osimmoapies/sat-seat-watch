@@ -94,5 +94,38 @@ for head_name, head in [("live-like", HEAD_LIVELIKE), ("hostile", HEAD)]:
     c, s = run(page_unknown, "unknown again after re-arm")
     expect(len(s) == 1, "alerts immediately again")
 
+print("===== flow failures (FATAL / site blocked) =====")
+RAISE = {"exc": None}
+
+
+def failing_flow(context, page):
+    if RAISE["exc"]:
+        raise RuntimeError(RAISE["exc"])
+    return fake_flow(context, page)
+
+
+check.ensure_on_test_center_search = failing_flow
+page_ok = HEAD_LIVELIKE.replace("(N)", "(1)") + card(*QSI, NO) + TAIL
+# a flag left by the previous code ("alerted", not a timestamp) must not
+# silence a new block episode forever
+open(check.BLOCK_FLAG_PATH, "w").write("alerted")
+RAISE["exc"] = "SITE_BLOCKED_SUSPECTED"
+c, s = run(page_ok, "blocked #1 (legacy flag present)")
+expect(c == 0 and len(s) == 1 and "блокирует" in s[0], "block alert, exit 0")
+c, s = run(page_ok, "blocked #2")
+expect(c == 0 and s == [], "block reminder throttled (6h)")
+RAISE["exc"] = "COULD_NOT_ENTER_REGISTRATION_FLOW"
+c, s = run(page_ok, "fatal #1")
+expect(c == 1 and len(s) == 1 and "ошибка" in s[0], "error alert, exit 1")
+c, s = run(page_ok, "fatal #2")
+expect(c == 1 and s == [], "error alert throttled (1h)")
+RAISE["exc"] = None
+c, s = run(page_ok, "healthy again")
+expect(c == 0 and not os.path.exists(check.BLOCK_FLAG_PATH) and not os.path.exists(check.ERROR_ALERT_PATH),
+       "block/error throttles reset")
+RAISE["exc"] = "COULD_NOT_ENTER_REGISTRATION_FLOW"
+c, s = run(page_ok, "fatal again after recovery")
+expect(len(s) == 1, "new episode alerts immediately")
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)
