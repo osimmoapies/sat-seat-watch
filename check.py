@@ -13,8 +13,34 @@ TG_CHAT_ID = os.environ["TG_CHAT_ID"]
 
 STATE_PATH = os.environ.get("STATE_PATH", "state.json")
 FLAG_PATH = os.environ.get("FLAG_PATH", "started.flag")
+BLOCK_FLAG_PATH = FLAG_PATH + ".blocked_alerted"
 
 TEST_DATE_BUTTON_ID = "qc-id-selectdatecenter-testdate-button-DEC-05"
+
+REALISTIC_USER_AGENT = (
+    # must match the ACTUAL platform (this runs on Linux in GitHub Actions) --
+    # a Windows/Mac UA string paired with navigator.platform/WebGL still
+    # reporting Linux is a cross-signal mismatch that bot-detection heuristics
+    # specifically look for, which would be worse than just using the default.
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+
+# Markers for common bot-protection vendors (Akamai, Cloudflare, PerimeterX/HUMAN,
+# Imperva) -- none of these phrases appear anywhere in the legitimate flow, so
+# matching here is a safe, low-false-positive signal that the site is actively
+# challenging/blocking us rather than just rendering something unexpected.
+BLOCK_MARKERS = [
+    "Access Denied", "Pardon the Interruption", "Request unsuccessful",
+    "Incapsula incident", "unusual traffic from your computer",
+    "Checking your browser before accessing", "Attention Required! | Cloudflare",
+    "Ray ID", "verify you are a human", "px-captcha",
+]
+
+
+def looks_blocked(text):
+    low = text.lower()
+    return any(m.lower() in low for m in BLOCK_MARKERS)
 
 
 def tg(text):
@@ -166,6 +192,8 @@ def ensure_on_test_center_search(context, page):
     time.sleep(3)
     dismiss_cookie_banner(page)
     content, text = dbg(page, "mysat_initial")
+    if looks_blocked(text):
+        raise RuntimeError("SITE_BLOCKED_SUSPECTED")
     if len(text.strip()) < 20:
         # blank/unrendered page, not necessarily "not logged in" -- give it one
         # more chance before concluding a fresh login is needed. Misreading this
@@ -219,6 +247,8 @@ def ensure_on_test_center_search(context, page):
                 break
         time.sleep(3)
         content, text = dbg(page, "after_entry_click")
+        if looks_blocked(text):
+            raise RuntimeError("SITE_BLOCKED_SUSPECTED")
 
         if "Verify with your password" in text or ("Password" in text and "Forgot password" in text):
             log("DEBUG step-up password re-verification required")
@@ -523,8 +553,16 @@ def ensure_on_test_center_search(context, page):
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx_kwargs = {}
+        # --disable-blink-features=AutomationControlled hides the otherwise
+        # very easy navigator.webdriver=true bot signal that Chromium sets by
+        # default under Playwright/Puppeteer -- cheap, standard mitigation
+        # against this specific automation fingerprint.
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        ctx_kwargs = {
+            "user_agent": REALISTIC_USER_AGENT,
+            "viewport": {"width": 1366, "height": 768},
+            "locale": "en-US",
+        }
         if os.path.exists(STATE_PATH) and os.path.getsize(STATE_PATH) > 2:
             ctx_kwargs["storage_state"] = STATE_PATH
         context = browser.new_context(**ctx_kwargs)
@@ -535,21 +573,42 @@ def main():
                 document.dispatchEvent(new Event('visibilitychange'));
                 window.dispatchEvent(new Event('focus'));
             });
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
         """)
         page = context.new_page()
 
         try:
             page = ensure_on_test_center_search(context, page)
+            # a successful run means we're past any block -- clear the
+            # one-time block-alert flag so a FUTURE block episode (not just
+            # the current one) gets its own fresh alert instead of being
+            # silenced forever by a flag left over from a past, now-resolved
+            # block.
+            if os.path.exists(BLOCK_FLAG_PATH):
+                os.remove(BLOCK_FLAG_PATH)
         except Exception as e:
             log("FATAL during flow:", e)
             expected_pause = str(e) == "NEEDS_SCHOOL_NAME_INPUT"
-            if not expected_pause:
+            site_blocked = str(e) == "SITE_BLOCKED_SUSPECTED"
+            if site_blocked:
+                # a bot-protection challenge page was detected -- alert ONCE
+                # (not on every 5-min run while the block persists, which would
+                # just spam without being actionable) and back off quietly.
+                # This run still exits 0 so GitHub doesn't flag it as a workflow
+                # failure; the next scheduled run tries again on its own.
+                if not os.path.exists(BLOCK_FLAG_PATH):
+                    tg("🔴 Сайт College Board похоже временно блокирует/проверяет автоматические запросы. "
+                       "Мониторинг продолжит пробовать сам, но если это не проходит долго — возможно, нужно подождать "
+                       "или проверить вручную.")
+                    with open(BLOCK_FLAG_PATH, "w") as f:
+                        f.write("alerted")
+            elif not expected_pause:
                 tg(f"🔴 SAT-мониторинг (облако): ошибка при проверке — {e}")
             context.storage_state(path=STATE_PATH)
             browser.close()
             # expected pause (waiting on the owner to fill the school field) must NOT
             # be reported as a workflow failure, or GitHub emails on every 5-min run
-            sys.exit(0 if expected_pause else 1)
+            sys.exit(0 if (expected_pause or site_blocked) else 1)
 
         try:
             body_text = page.inner_text("body")

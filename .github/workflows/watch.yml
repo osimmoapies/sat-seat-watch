@@ -34,6 +34,7 @@ jobs:
             state.json
             started.flag
             started.flag.school_asked
+            started.flag.blocked_alerted
           key: sat-watch-state-${{ github.run_id }}
           restore-keys: |
             sat-watch-state-
@@ -56,4 +57,5 @@ jobs:
             state.json
             started.flag
             started.flag.school_asked
+            started.flag.blocked_alerted
           key: sat-watch-state-${{ github.run_id }}
