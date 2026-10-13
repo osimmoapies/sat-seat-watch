@@ -39,6 +39,8 @@ def run(html, label):
         code = 0
     except SystemExit as e:
         code = e.code
+    except Exception as e:
+        code = f"uncaught {type(e).__name__}"
     flags = sorted(f for f in os.listdir(work) if f.startswith("started.flag"))
     print(f"--- {label}: exit={code} alerts={[s[:60] for s in SENT]} flags={flags}")
     return code, list(SENT)
@@ -147,8 +149,46 @@ RAISE["exc"] = "COULD_NOT_ENTER_REGISTRATION_FLOW"
 c, s = run(page_ok, "fatal again after recovery")
 expect(len(s) == 1, "new episode alerts immediately")
 
-print("===== daily heartbeat =====")
+print("===== browser / saved-session setup failures =====")
 import json  # noqa: E402
+from playwright.sync_api import BrowserType  # noqa: E402
+RAISE["exc"] = None
+run(page_ok, "healthy (resets the error throttle)")
+# Playwright writes state.json non-atomically and watch.yml re-caches it after
+# every run: a write cut off mid-way must not crash every later run
+open(check.STATE_PATH, "w").write('{"cookies": [{"name": "JSESSIONID", "val')
+c, s = run(page_ok, "state.json truncated mid-write")
+expect(c == 0 and s == [], "run goes ahead without the saved session, no alert")
+state_ok = True
+try:
+    json.load(open(check.STATE_PATH))
+except ValueError:
+    state_ok = False
+expect(state_ok, "state.json rewritten as valid JSON (heals itself)")
+# a browser that dies at launch: Playwright's error carries the full command
+# line and stderr (~15k chars), far over Telegram's 4096-char message limit
+fake_dir = tempfile.mkdtemp()
+fake_chrome = os.path.join(fake_dir, "chrome")
+with open(fake_chrome, "w") as f:
+    f.write("#!/bin/bash\nfor i in $(seq 1 40); do echo \"[$i:ERROR] error while loading shared libraries:"
+            " libnss3.so: cannot open shared object file\" >&2; done\nexit 127\n")
+os.chmod(fake_chrome, 0o755)
+REAL_LAUNCH = BrowserType.launch
+BrowserType.launch = lambda self, **kw: REAL_LAUNCH(
+    self, **{k: v for k, v in kw.items() if k != "channel"}, executable_path=fake_chrome)
+hb_errors = json.load(open(check.HEARTBEAT_PATH))["counts"].get("error", 0)
+c, s = run(page_ok, "browser fails to launch")
+expect(c == 1 and len(s) == 1 and "ошибка" in s[0], "error alert, exit 1")
+expect(all(len(x) <= 4096 for x in s), f"alert fits Telegram's limit (len={[len(x) for x in s]})")
+expect(json.load(open(check.HEARTBEAT_PATH))["counts"].get("error", 0) == hb_errors + 1,
+       "counted in the daily report")
+c, s = run(page_ok, "browser fails to launch again")
+expect(c == 1 and s == [], "error alert throttled (1h)")
+BrowserType.launch = REAL_LAUNCH
+c, s = run(page_ok, "browser launches again")
+expect(c == 0 and not os.path.exists(check.ERROR_ALERT_PATH), "healthy, throttle reset")
+
+print("===== daily heartbeat =====")
 RAISE["exc"] = None
 check.HEARTBEAT_HOUR = 0
 os.path.exists(check.HEARTBEAT_PATH) and os.remove(check.HEARTBEAT_PATH)

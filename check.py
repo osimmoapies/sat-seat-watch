@@ -846,54 +846,70 @@ def heartbeat(outcome):
         log("heartbeat skipped:", e)
 
 
+def open_browser(p):
+    # --disable-blink-features=AutomationControlled hides the otherwise
+    # very easy navigator.webdriver=true bot signal that Chromium sets by
+    # default under Playwright/Puppeteer -- cheap, standard mitigation
+    # against this specific automation fingerprint. The flag alone gives
+    # exactly what real Chrome reports (false, from Navigator.prototype);
+    # do not also redefine it in an init script -- that made it undefined
+    # AND an own property of navigator, two tells real Chrome never shows.
+    #
+    # channel="chromium" runs the full Chromium build in new headless mode
+    # instead of the default chromium-headless-shell (both are already
+    # installed by `playwright install chromium`). The headless shell
+    # brands itself "HeadlessChrome" in the sec-ch-ua header it sends with
+    # EVERY request -- a user_agent override does not touch client hints,
+    # so each request said both "Chrome/130" (UA) and "HeadlessChrome;v=153"
+    # (sec-ch-ua). Full Chromium sends a plain "Chromium" brand.
+    browser = p.chromium.launch(channel="chromium", headless=True,
+                                args=["--disable-blink-features=AutomationControlled"])
+    ctx_kwargs = {
+        "user_agent": REALISTIC_USER_AGENT.format(major=browser.version.split(".")[0]),
+        "viewport": {"width": 1366, "height": 768},
+        "locale": "en-US",
+    }
+    context = None
+    if os.path.exists(STATE_PATH) and os.path.getsize(STATE_PATH) > 2:
+        try:
+            context = browser.new_context(storage_state=STATE_PATH, **ctx_kwargs)
+        except Exception as e:
+            # Playwright writes state.json non-atomically (truncate, then write)
+            # and watch.yml re-caches it after every run: one write cut short
+            # left a file that crashed EVERY later run right here, forever.
+            # Log in fresh instead; this run's storage_state() replaces it.
+            log("WARNING: saved session unreadable, logging in fresh:", repr(e)[:200])
+    if context is None:
+        context = browser.new_context(**ctx_kwargs)
+    context.add_init_script("""
+        Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});
+        Object.defineProperty(document, 'hidden', {get: () => false});
+        window.addEventListener('load', () => {
+            document.dispatchEvent(new Event('visibilitychange'));
+            window.dispatchEvent(new Event('focus'));
+        });
+    """)
+    fingerprint_logged = []
+
+    def log_fingerprint_once(req):
+        # what the site actually receives -- so a UA/client-hint mismatch
+        # shows up in the run log instead of having to be guessed at
+        if not fingerprint_logged and "collegeboard.org" in req.url:
+            fingerprint_logged.append(True)
+            log("DEBUG fingerprint headers:", {k: v for k, v in req.headers.items()
+                                                if k == "user-agent" or k.startswith("sec-ch-ua")})
+    context.on("request", log_fingerprint_once)
+    return browser, context, context.new_page()
+
+
 def main():
     with sync_playwright() as p:
-        # --disable-blink-features=AutomationControlled hides the otherwise
-        # very easy navigator.webdriver=true bot signal that Chromium sets by
-        # default under Playwright/Puppeteer -- cheap, standard mitigation
-        # against this specific automation fingerprint. The flag alone gives
-        # exactly what real Chrome reports (false, from Navigator.prototype);
-        # do not also redefine it in an init script -- that made it undefined
-        # AND an own property of navigator, two tells real Chrome never shows.
-        #
-        # channel="chromium" runs the full Chromium build in new headless mode
-        # instead of the default chromium-headless-shell (both are already
-        # installed by `playwright install chromium`). The headless shell
-        # brands itself "HeadlessChrome" in the sec-ch-ua header it sends with
-        # EVERY request -- a user_agent override does not touch client hints,
-        # so each request said both "Chrome/130" (UA) and "HeadlessChrome;v=153"
-        # (sec-ch-ua). Full Chromium sends a plain "Chromium" brand.
-        browser = p.chromium.launch(channel="chromium", headless=True,
-                                    args=["--disable-blink-features=AutomationControlled"])
-        ctx_kwargs = {
-            "user_agent": REALISTIC_USER_AGENT.format(major=browser.version.split(".")[0]),
-            "viewport": {"width": 1366, "height": 768},
-            "locale": "en-US",
-        }
-        if os.path.exists(STATE_PATH) and os.path.getsize(STATE_PATH) > 2:
-            ctx_kwargs["storage_state"] = STATE_PATH
-        context = browser.new_context(**ctx_kwargs)
-        context.add_init_script("""
-            Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});
-            Object.defineProperty(document, 'hidden', {get: () => false});
-            window.addEventListener('load', () => {
-                document.dispatchEvent(new Event('visibilitychange'));
-                window.dispatchEvent(new Event('focus'));
-            });
-        """)
-        fingerprint_logged = []
-
-        def log_fingerprint_once(req):
-            # what the site actually receives -- so a UA/client-hint mismatch
-            # shows up in the run log instead of having to be guessed at
-            if not fingerprint_logged and "collegeboard.org" in req.url:
-                fingerprint_logged.append(True)
-                log("DEBUG fingerprint headers:", {k: v for k, v in req.headers.items()
-                                                    if k == "user-agent" or k.startswith("sec-ch-ua")})
-        context.on("request", log_fingerprint_once)
-        page = context.new_page()
-
+        browser = context = None
         try:
+            # inside the try: a browser that fails to start (or any other setup
+            # error) used to crash before every alert AND the heartbeat --
+            # monitoring stopped with nothing reaching the owner
+            browser, context, page = open_browser(p)
             page = ensure_on_test_center_search(context, page)
             # a successful run means we're past any block -- clear the
             # one-time block-alert flag so a FUTURE block episode (not just
@@ -925,10 +941,16 @@ def main():
                 # was sent on EVERY failing run (every 5 min while e.g. login is
                 # broken) -- enough noise to get the bot muted, which would also
                 # mute the seat alert. Once per episode, then hourly reminders.
-                tg_throttled(ERROR_ALERT_PATH, f"🔴 SAT-мониторинг (облако): ошибка при проверке — {e}", 3600)
+                # Truncated: a browser launch failure's message (command line +
+                # stderr) runs to ~15k chars, and Telegram rejects anything over
+                # 4096 -- so that alert would fail on every run, never delivered.
+                tg_throttled(ERROR_ALERT_PATH, f"🔴 SAT-мониторинг (облако): ошибка при проверке — {str(e)[:300]}", 3600)
             try:
-                context.storage_state(path=STATE_PATH)
-                browser.close()
+                # no context = setup failed: keep the cached state.json as it is
+                if context is not None:
+                    context.storage_state(path=STATE_PATH)
+                if browser is not None:
+                    browser.close()
             except Exception as close_err:
                 log("could not save state/close browser after failure:", close_err)
             heartbeat("blocked" if site_blocked else "error")
