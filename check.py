@@ -297,6 +297,24 @@ FIND_CONTINUE_JS = r"""
 
 # Text of the step after a successful reserve (photo upload, then payment). Only
 # counts if NEW relative to the results page -- see the reserve block.
+# He is in the final year of an 11-year school system (graduates June 2027).
+# College Board's international guidance counts years back from the final year
+# ("second-to-last year" / "final year"), so the US equivalent is 12th grade,
+# not the local "11". Picks the option by its label, never a hard-coded value.
+def fix_grade(page):
+    grade_sel = page.query_selector("#qc-id-personalinfo-list-grade")
+    if not grade_sel:
+        return False
+    opts = grade_sel.evaluate("s => Array.from(s.options).map(o => [o.value, o.text.trim()])")
+    log("DEBUG grade options:", opts, "| current:", grade_sel.input_value())
+    want = next((v for v, t in opts if re.fullmatch(r"12th\s+grade", t, re.I)), None)
+    if not want or grade_sel.input_value() == want:
+        return False
+    grade_sel.select_option(want)
+    log(f"DEBUG corrected grade to 12th Grade (value={want})")
+    return True
+
+
 CONFIRM_STEPS = ["STEP 3 OF 4", "STEP 4 OF 4"]  # case-sensitive
 CONFIRM_WORDS = ["photo", "payment", "upload"]  # case-insensitive
 
@@ -482,10 +500,7 @@ def ensure_on_test_center_search(context, page):
         if "Choose your test location" in text and "On Your Way" not in text:
             break
         if "School Information" in content and "Tell us about your school" in content:
-            grade_sel = page.query_selector("#qc-id-personalinfo-list-grade")
-            if grade_sel and grade_sel.input_value() != "6":
-                grade_sel.select_option("6")
-                log("DEBUG corrected grade to 11th Grade (value=6)")
+            if fix_grade(page):
                 time.sleep(1)
             # target the school-info continue button specifically -- the generic
             # "[id*=button-continue]" selector can match a stale, already-enabled

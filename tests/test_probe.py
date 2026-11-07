@@ -126,6 +126,18 @@ def main():
               and "'pw'" not in dump)  # not even the password's length
         bad += not ok
         print(f"{'OK ' if ok else 'BAD'} stuck dump: personal values masked (street name stays) leaked={leaked}")
+        # grade: final school year = 12th Grade, chosen by label; left alone if absent/already set
+        for name, html, want_val, want_ret in [
+            ("grade 11 -> 12", "<option value=5>10th Grade</option><option value=6 selected>11th Grade</option><option value=7>12th Grade</option>", "7", True),
+            ("grade already 12", "<option value=6>11th Grade</option><option value=7 selected>12th Grade</option>", "7", False),
+            ("no 12th option", "<option value=5>10th Grade</option><option value=6 selected>11th Grade</option>", "6", False),
+            ("12th not 12th+", "<option value=8 selected>12th+ / Graduated</option><option value=7>12th Grade</option>", "7", True)]:
+            pg.set_content(f"<select id=qc-id-personalinfo-list-grade>{html}</select>")
+            ret = check.fix_grade(pg)
+            got = pg.eval_on_selector("#qc-id-personalinfo-list-grade", "s => s.value")
+            ok = (ret == want_ret and got == want_val)
+            bad += not ok
+            print(f"{'OK ' if ok else 'BAD'} {name:38s} value={got} ret={ret}")
         b.close()
     print("FAILURES:", bad)
     return bad
