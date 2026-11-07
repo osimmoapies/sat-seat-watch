@@ -219,5 +219,33 @@ c, s = run(page_ok, "Telegram back")
 expect(len(s) == 1 and "отчёта: 2 (" in s[0], "undelivered report retried, counts kept")
 check.HEARTBEAT_HOUR = 24
 
+
+print("===== password rejected =====")
+for f in os.listdir(work):
+    os.remove(os.path.join(work, f))
+LOGINS = []
+
+
+def rejecting_flow(context, page):
+    LOGINS.append(1)
+    check.raise_if_password_rejected("Verify with your password Unable to sign in Password")
+
+
+check.ensure_on_test_center_search = rejecting_flow
+c, s = run("", "password rejected")
+expect(c == 1 and len(s) == 1 and "не принимает пароль" in s[0] and len(LOGINS) == 1, "one clear alert, this run marked failed")
+expect(os.path.exists(check.BADPW_PATH), "rejected secret remembered")
+expect(check.CB_PASSWORD not in open(check.BADPW_PATH).read(), "password itself not stored")
+c, s = run("", "same secret, next run")
+expect(c == 0 and s == [] and len(LOGINS) == 1, "no login attempt, no repeat alert")
+open(check.BADPW_ALERT_PATH, "w").write(str(0))
+c, s = run("", "same secret, 12h later")
+expect(c == 0 and len(s) == 1 and len(LOGINS) == 1, "reminder only, still no login attempt")
+check.CB_PASSWORD = "new-dummy-pw"
+check.ensure_on_test_center_search = fake_flow
+c, s = run(page_ok, "secret updated")
+expect(c == 0 and not os.path.exists(check.BADPW_PATH), "logs in again, guard cleared")
+expect(not any("пароль" in x for x in s), "no password alert after the fix")
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

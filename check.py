@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -25,6 +27,10 @@ BLIND_ALERT_PATH = FLAG_PATH + ".blind_alerted"
 UNKNOWN_ALERT_PATH = FLAG_PATH + ".unknown_alerted"
 OTHER_SEAT_ALERT_PATH = FLAG_PATH + ".other_seat_alerted"
 HEARTBEAT_PATH = FLAG_PATH + ".heartbeat"
+# set when College Board rejects the password; holds pw_fingerprint() of the
+# rejected secret so runs stop re-trying it until the secret is changed
+BADPW_PATH = FLAG_PATH + ".badpw"
+BADPW_ALERT_PATH = FLAG_PATH + ".badpw_alerted"
 DUSHANBE_UTC_OFFSET = 5 * 3600
 HEARTBEAT_HOUR = 9  # Dushanbe local time; the daily report goes out on the first run after it
 
@@ -103,6 +109,21 @@ def remove_flag(path):
         os.remove(path)
 
 
+def pw_fingerprint():
+    # keyed with another secret: the cache holding this file must not become an
+    # offline password-guessing oracle. Changes whenever CB_PASSWORD changes.
+    return hmac.new(TG_BOT_TOKEN.encode(), (CB_EMAIL + "\0" + CB_PASSWORD).encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def raise_if_password_rejected(text):
+    # Okta's own message on the password step. Every login path must check it:
+    # the step-up and in-place re-login paths used to miss it and report
+    # COULD_NOT_ENTER_REGISTRATION_FLOW instead (27 Oct, after the password changed).
+    if "Unable to sign in" in text:
+        raise RuntimeError("LOGIN_FAILED_BAD_PASSWORD")
+
+
 def tg_throttled(flag_path, text, min_interval):
     # repeating the same non-seat alert every 5 minutes trains the owner to mute
     # the bot -- and a muted bot is how the one alert that matters (seat found)
@@ -167,8 +188,7 @@ def do_login(page):
         # missing it, risking an uncaught exception that would report a
         # perfectly fine login as a FATAL error.
         log("DEBUG do_login: networkidle wait timed out, proceeding anyway")
-    if "Unable to sign in" in page.content():
-        raise RuntimeError("LOGIN_FAILED_BAD_PASSWORD")
+    raise_if_password_rejected(page.content())
     log("login ok")
 
 
@@ -377,6 +397,7 @@ def ensure_on_test_center_search(context, page):
                 pass
             time.sleep(5)
             content, text = dbg(page, "after_stepup_password")
+            raise_if_password_rejected(text)
         elif "Sign In" in text and "Email Address" in text:
             # the session fully expired (not just a step-up) -- a complete login
             # form is shown (email+password), distinct from the partial
@@ -409,6 +430,7 @@ def ensure_on_test_center_search(context, page):
                     pass
                 time.sleep(5)
             content, text = dbg(page, "after_full_relogin")
+            raise_if_password_rejected(text)
             if len(text.strip()) < 20:
                 # this exact transition (fresh landing on mysat.collegeboard.org
                 # right after a full login) has repeatedly needed extra time + a
@@ -903,6 +925,26 @@ def open_browser(p):
 
 
 def main():
+    stored = None
+    try:
+        with open(BADPW_PATH) as f:
+            stored = f.read().strip()
+    except OSError:
+        pass
+    if stored:
+        if hmac.compare_digest(stored, pw_fingerprint()):
+            # every failed attempt counts toward College Board's account lockout:
+            # ~1600 of them (27 Oct-7 Nov) before this guard existed
+            log("PAUSED: CB_PASSWORD was rejected and has not changed since -- not logging in")
+            tg_throttled(BADPW_ALERT_PATH, "🔴 SAT-мониторинг: College Board не принимает пароль (пароль сменили или аккаунт заблокирован). "
+                "Места НЕ проверяются. Что сделать: 1) войди сам на collegeboard.org (если не пускает — «Forgot password»); "
+                "2) GitHub → osimmoapies/sat-seat-watch → Settings → Secrets → Actions → CB_PASSWORD → Update. "
+                "Пока секрет тот же, бот больше не пробует входить (чтобы аккаунт не заблокировали).", 12 * 3600)
+            heartbeat("error")
+            sys.exit(0)
+        log("CB_PASSWORD secret changed since it was rejected -- trying to log in again")
+        remove_flag(BADPW_PATH)
+        remove_flag(BADPW_ALERT_PATH)
     with sync_playwright() as p:
         browser = context = None
         try:
@@ -924,7 +966,14 @@ def main():
             log("FATAL during flow:", e)
             expected_pause = str(e) == "NEEDS_SCHOOL_NAME_INPUT"
             site_blocked = str(e) == "SITE_BLOCKED_SUSPECTED"
-            if site_blocked:
+            if str(e) == "LOGIN_FAILED_BAD_PASSWORD":
+                with open(BADPW_PATH, "w") as f:
+                    f.write(pw_fingerprint())
+                tg_throttled(BADPW_ALERT_PATH, "🔴 SAT-мониторинг: College Board не принимает пароль (пароль сменили или аккаунт заблокирован). "
+                             "Места НЕ проверяются. Что сделать: 1) войди сам на collegeboard.org (если не пускает — «Forgot password»); "
+                             "2) GitHub → osimmoapies/sat-seat-watch → Settings → Secrets → Actions → CB_PASSWORD → Update. "
+                             "Пока секрет тот же, бот больше не пробует входить (чтобы аккаунт не заблокировали).", 12 * 3600)
+            elif site_blocked:
                 # a bot-protection challenge page was detected -- not on every
                 # 5-min run while the block persists (spam, not actionable), but
                 # not just ONCE either: a block lasting days used to mean one
