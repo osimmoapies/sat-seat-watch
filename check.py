@@ -1180,8 +1180,10 @@ def main():
                 log("RESERVE ATTEMPT RESULT:", detail)
 
                 if reserved_ok:
-                    result_alert_ok = tg("✅ Бронь похожа на успешную (страница сдвинулась дальше). ИДИ К КОМПЬЮТЕРУ СЕЙЧАС — "
-                                         "20 минут на фото и оплату $68, иначе бронь сгорит: https://satreg.collegeboard.org/register/testCenterSearch")
+                    result_alert_ok = tg("✅ Бронь похожа на успешную (страница сдвинулась дальше). ИДИ К КОМПЬЮТЕРУ СЕЙЧАС: войди в свой аккаунт, "
+                                         "загрузи фото и оплати — до 20 ноя $111, 21–24 ноя $149. Сколько College Board держит место без оплаты, "
+                                         "неизвестно — не жди ни минуты. Если брони там нет — ищи место заново: "
+                                         "https://satreg.collegeboard.org/register/testCenterSearch")
                 else:
                     result_alert_ok = tg(f"⚠️ НЕ УВЕРЕН, что бронь прошла — проверить не смог. Заходи СЕЙЧАС САМ и бронируй вручную: "
                                          f"https://satreg.collegeboard.org/register/testCenterSearch (детали: {detail[:200]})")
@@ -1219,7 +1221,7 @@ def main():
             if results_seen:
                 clear_blind_state()
             if not os.path.exists(FLAG_PATH):
-                tg("🟡 SAT-мониторинг в облаке (GitHub Actions) запущен и работает. Проверка каждые ~5 минут, независимо от твоего Mac.")
+                tg("🟡 SAT-мониторинг в облаке (GitHub Actions) запущен и работает. Проверка каждые ~10 минут, независимо от твоего Mac.")
                 with open(FLAG_PATH, "w") as f:
                     f.write("started")
         except Exception as e:
