@@ -158,6 +158,55 @@ def needs_login(page):
     return "collegeboard.org/login" in url or "idp.collegeboard.org" in url
 
 
+# How long to wait, after the password submit, for College Board to finish the
+# sign-in. 12-13 Nov: every run after an expired session was a BLIND RUN.
+# do_login() logged "login ok" 0.04 s after the password click, because the
+# networkidle wait returned at once: the page had already gone idle during the
+# 10 s wait for a method picker that never came. page.goto() then cut off the
+# sign-in. mysat stayed on its own "Sign In" page until a lucky run saved a session.
+LOGIN_DONE_TIMEOUT = 45
+
+
+def mask_text(t):
+    # run logs are PUBLIC (see STUCK_DUMP_JS): never print an email or any digit
+    t = re.sub(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", "<email>", t or "")
+    return re.sub(r"\d", "#", t).replace("\n", " ")
+
+
+def wait_signed_in(page, timeout):
+    """Call right after the password submit. Returns True once College Board has
+    taken us off the sign-in form: we left the login URLs, or the password
+    field has been gone for 5 checks in a row (1 s apart; 3 was too few for a
+    redirect chain that stays a few seconds on a login URL). Raises
+    LOGIN_FAILED_BAD_PASSWORD when the password is rejected. Returns False on
+    timeout and logs (masked) what the page shows."""
+    t0, gone, text = time.time(), 0, ""
+    while time.time() - t0 < timeout:
+        time.sleep(1)
+        try:
+            left = not needs_login(page)
+            text = page.evaluate("() => document.body ? document.body.innerText : ''")
+            pw_shown = page.is_visible("input[type=password]")
+        except Exception:
+            continue  # mid-navigation: the page is changing, look again
+        raise_if_password_rejected(text)
+        gone = 0 if pw_shown else gone + 1
+        if left or gone >= 5:
+            log(f"DEBUG sign-in finished after {time.time() - t0:.0f}s url={page.url.split('?')[0][:120]} "
+                f"text_preview={mask_text(text)[:150]}")
+            return True
+    log(f"WARNING: sign-in not finished after {timeout}s url={page.url.split('?')[0][:120]} "
+        f"text_preview={mask_text(text)[:300]}")
+    return False
+
+
+def submit_password(page, find_timeout_ms, done_timeout):
+    pw_input = page.wait_for_selector("input[type=password]", timeout=find_timeout_ms)
+    pw_input.fill(CB_PASSWORD)
+    page.click("input[type=submit]", force=True)
+    return wait_signed_in(page, done_timeout)
+
+
 def do_login(page):
     log("logging in fresh")
     page.goto("https://account.collegeboard.org/login/login", wait_until="domcontentloaded")
@@ -170,26 +219,27 @@ def do_login(page):
         return
     page.fill("#input28", CB_EMAIL)
     page.click("input[type=submit]", force=True)
+    # whichever comes first: the method picker or the password field (with a
+    # saved but expired session the site goes straight to the password)
+    picker = page.get_by_text("Select from the following options")
     try:
-        page.wait_for_selector("text=Select from the following options", timeout=10000)
-        page.click("a[aria-label='Select Password.']", force=True)
+        picker.or_(page.locator("input[type=password]")).first.wait_for(timeout=20000)
     except Exception:
+        log("DEBUG do_login: neither method picker nor password field after 20s")
+    if any(picker.nth(i).is_visible() for i in range(picker.count())):
+        page.click("a[aria-label='Select Password.']", force=True)
+    else:
         log("DEBUG do_login: no method-picker shown, assuming password field appears directly")
-    pw_input = page.wait_for_selector("input[type=password]", timeout=20000)
-    pw_input.fill(CB_PASSWORD)
-    page.click("input[type=submit]", force=True)
+    signed_in = submit_password(page, 20000, LOGIN_DONE_TIMEOUT)
     try:
-        page.wait_for_load_state("networkidle", timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         # this site can keep background polling/websocket activity alive
         # indefinitely, which makes networkidle time out even on a successful
-        # login -- the equivalent wait elsewhere in this file (full re-login
-        # path) already tolerates this the same way; do_login() itself was
-        # missing it, risking an uncaught exception that would report a
-        # perfectly fine login as a FATAL error.
+        # login -- tolerated the same way as the in-place re-login paths
         log("DEBUG do_login: networkidle wait timed out, proceeding anyway")
     raise_if_password_rejected(page.content())
-    log("login ok")
+    log("login ok" if signed_in else "login NOT confirmed -- going on, the blind-run check will tell")
 
 
 def accept_terms_if_present(page):
@@ -406,9 +456,7 @@ def ensure_on_test_center_search(context, page):
 
         if "Verify with your password" in text or ("Password" in text and "Forgot password" in text):
             log("DEBUG step-up password re-verification required")
-            pw_input = page.wait_for_selector("input[type=password]", timeout=15000)
-            pw_input.fill(CB_PASSWORD)
-            page.click("input[type=submit]", force=True)
+            submit_password(page, 15000, 20)
             try:
                 page.wait_for_load_state("networkidle", timeout=20000)
             except Exception:
@@ -439,9 +487,7 @@ def ensure_on_test_center_search(context, page):
                     page.click("a[aria-label='Select Password.']", force=True)
                 except Exception:
                     log("DEBUG no method-picker shown, assuming password field appears directly")
-                pw_input = page.wait_for_selector("input[type=password]", timeout=15000)
-                pw_input.fill(CB_PASSWORD)
-                page.click("input[type=submit]", force=True)
+                submit_password(page, 15000, 20)
                 try:
                     page.wait_for_load_state("networkidle", timeout=20000)
                 except Exception:
